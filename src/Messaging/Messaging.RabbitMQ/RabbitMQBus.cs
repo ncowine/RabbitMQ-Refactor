@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,12 +23,17 @@ namespace Messaging.RabbitMQ
     /// </para>
     /// Every instance has its own exclusive queue, so every instance receives every message; its own messages are
     /// dropped using the <see cref="WireHeaders.SourceId"/> header. Received messages go to the <see cref="IInboundDispatcher"/>.
+    /// <para>
+    /// The optional <see cref="IMessagingObserver"/> sees every stage and can add headers to outgoing messages.
+    /// Without one, nothing beyond the frozen wire format is sent.
+    /// </para>
     /// </summary>
     public sealed class RabbitMQBus : IDisposable
     {
         private readonly RabbitMQBusOptions options;
         private readonly IMessageSerializer serializer;
         private readonly IInboundDispatcher dispatcher;
+        private readonly IMessagingObserver observer;
         private readonly string instanceId;
         private readonly ConcurrentQueue<PendingMessage> outstandingMessages = new ConcurrentQueue<PendingMessage>();
         private readonly ConcurrentDictionary<string, MessageRegistration> subscriptions =
@@ -43,7 +49,8 @@ namespace Messaging.RabbitMQ
         private bool started;
         private bool disposed;
 
-        public RabbitMQBus(RabbitMQBusOptions options, IMessageSerializer serializer, IInboundDispatcher dispatcher)
+        /// <param name="observer">Optional. Null means no observer and no extra headers.</param>
+        public RabbitMQBus(RabbitMQBusOptions options, IMessageSerializer serializer, IInboundDispatcher dispatcher, IMessagingObserver observer = null)
         {
             if (options == null)
             {
@@ -58,6 +65,7 @@ namespace Messaging.RabbitMQ
             this.options = options;
             this.serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
             this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+            this.observer = observer ?? NullMessagingObserver.Instance;
             instanceId = string.IsNullOrWhiteSpace(options.InstanceId) ? Guid.NewGuid().ToString("N") : options.InstanceId;
         }
 
@@ -101,6 +109,7 @@ namespace Messaging.RabbitMQ
         /// <summary>
         /// Serializes <paramref name="message"/> now and buffers it for publishing as <paramref name="wireName"/>.
         /// Returns immediately; the message is sent once a publisher connection is available.
+        /// <see cref="IMessagingObserver.OnPublishing"/> runs here, on the caller's thread.
         /// </summary>
         public void Enqueue(string wireName, object message)
         {
@@ -111,7 +120,12 @@ namespace Messaging.RabbitMQ
                 throw new ArgumentException("A wire name is required.", nameof(wireName));
             }
 
-            outstandingMessages.Enqueue(new PendingMessage(wireName, serializer.Serialize(message)));
+            byte[] body = serializer.Serialize(message);
+
+            PublishContext context = new PublishContext(wireName, options.BusName, Guid.NewGuid().ToString("N"), message?.GetType());
+            Observe(o => o.OnPublishing(context), nameof(IMessagingObserver.OnPublishing));
+
+            outstandingMessages.Enqueue(new PendingMessage(context, body));
         }
 
         /// <summary>Starts receiving <paramref name="registration"/>. Does nothing when already subscribed.</summary>
@@ -198,6 +212,7 @@ namespace Messaging.RabbitMQ
                         await CloseConsumer().ConfigureAwait(false);
                         await OpenConsumer(token).ConfigureAwait(false);
                         WriteLog($"Consumer connected, queue '{consumerQueueName}'.");
+                        ObserveConnection(ConnectionRole.Consumer, ConnectionStatus.Connected, null, null);
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -207,6 +222,7 @@ namespace Messaging.RabbitMQ
                 catch (Exception ex)
                 {
                     WriteLog($"Consumer connection failed: {ex.Message}");
+                    ObserveConnection(ConnectionRole.Consumer, ConnectionStatus.Failed, null, ex);
                 }
 
                 if (!await Delay(options.ReconnectDelay, token).ConfigureAwait(false))
@@ -330,6 +346,8 @@ namespace Messaging.RabbitMQ
         private async Task OnMessageReceived(object sender, BasicDeliverEventArgs args)
         {
             IChannel channel = ((AsyncEventingBasicConsumer)sender).Channel;
+            MessageContext context = null;
+            Stopwatch stopwatch = null;
 
             try
             {
@@ -350,15 +368,26 @@ namespace Messaging.RabbitMQ
                     return;
                 }
 
-                object message = serializer.Deserialize(args.Body.ToArray(), registration.MessageType);
-                MessageContext context = new MessageContext(wireName, options.BusName, args.BasicProperties?.MessageId, args.Redelivered, headers);
+                headers.TryGetValue(WireHeaders.CorrelationId, out string correlationId);
+                context = new MessageContext(wireName, options.BusName, args.BasicProperties?.MessageId, correlationId, args.Redelivered, headers);
+                Observe(o => o.OnReceived(context), nameof(IMessagingObserver.OnReceived));
+                stopwatch = Stopwatch.StartNew();
 
+                object message = serializer.Deserialize(args.Body.ToArray(), registration.MessageType);
                 await dispatcher.Dispatch(registration, message, context, args.CancellationToken).ConfigureAwait(false);
+
+                Observe(o => o.OnHandled(context, stopwatch.Elapsed), nameof(IMessagingObserver.OnHandled));
             }
             catch (Exception ex)
             {
                 // Acked anyway so a bad message can't be redelivered forever.
                 WriteLog($"Failed to handle message '{args.RoutingKey}': {ex.Message}");
+
+                if (context != null)
+                {
+                    TimeSpan duration = stopwatch?.Elapsed ?? TimeSpan.Zero;
+                    Observe(o => o.OnHandlingFailed(context, duration, ex), nameof(IMessagingObserver.OnHandlingFailed));
+                }
             }
             finally
             {
@@ -379,6 +408,7 @@ namespace Messaging.RabbitMQ
         private Task OnConsumerConnectionShutdown(object sender, ShutdownEventArgs args)
         {
             WriteLog($"Consumer connection lost: {args.ReplyText}");
+            ObserveConnection(ConnectionRole.Consumer, ConnectionStatus.Lost, args.ReplyText, null);
             return Task.CompletedTask;
         }
 
@@ -397,6 +427,7 @@ namespace Messaging.RabbitMQ
                         await ClosePublisher().ConfigureAwait(false);
                         await OpenPublisher(token).ConfigureAwait(false);
                         WriteLog("Publisher connected.");
+                        ObserveConnection(ConnectionRole.Publisher, ConnectionStatus.Connected, null, null);
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -406,6 +437,7 @@ namespace Messaging.RabbitMQ
                 catch (Exception ex)
                 {
                     WriteLog($"Publisher connection failed: {ex.Message}");
+                    ObserveConnection(ConnectionRole.Publisher, ConnectionStatus.Failed, null, ex);
                 }
 
                 if (!await Delay(options.ReconnectDelay, token).ConfigureAwait(false))
@@ -459,6 +491,7 @@ namespace Messaging.RabbitMQ
         private Task OnPublisherConnectionShutdown(object sender, ShutdownEventArgs args)
         {
             WriteLog($"Publisher connection lost: {args.ReplyText}");
+            ObserveConnection(ConnectionRole.Publisher, ConnectionStatus.Lost, args.ReplyText, null);
             return Task.CompletedTask;
         }
 
@@ -470,15 +503,17 @@ namespace Messaging.RabbitMQ
         {
             while (!token.IsCancellationRequested)
             {
+                PendingMessage message = null;
                 try
                 {
                     IChannel channel = publisherChannel;
-                    if (channel != null && channel.IsOpen && outstandingMessages.TryPeek(out PendingMessage message))
+                    if (channel != null && channel.IsOpen && outstandingMessages.TryPeek(out message))
                     {
                         await PublishMessage(channel, message, token).ConfigureAwait(false);
 
                         // Only removed once the broker confirmed it; on failure it is retried.
                         outstandingMessages.TryDequeue(out PendingMessage published);
+                        Observe(o => o.OnPublished(published.Context), nameof(IMessagingObserver.OnPublished));
                         continue;
                     }
                 }
@@ -489,6 +524,11 @@ namespace Messaging.RabbitMQ
                 catch (Exception ex)
                 {
                     WriteLog($"Publish failed, message kept in outstanding queue: {ex.Message}");
+
+                    if (message != null)
+                    {
+                        Observe(o => o.OnPublishFailed(message.Context, ex), nameof(IMessagingObserver.OnPublishFailed));
+                    }
                 }
 
                 if (!await Delay(options.OutstandingPollInterval, token).ConfigureAwait(false))
@@ -500,22 +540,35 @@ namespace Messaging.RabbitMQ
 
         private async Task PublishMessage(IChannel channel, PendingMessage message, CancellationToken token)
         {
+            PublishContext context = message.Context;
+
+            // Frozen headers first and always ours; the observer's headers are additive only.
+            Dictionary<string, object> headers = new Dictionary<string, object>
+            {
+                [WireHeaders.MessageType] = context.WireName,
+                [WireHeaders.SourceId] = instanceId,
+            };
+
+            foreach (KeyValuePair<string, string> header in context.Headers)
+            {
+                if (!WireHeaders.IsFrozen(header.Key) && header.Value != null)
+                {
+                    headers[header.Key] = header.Value;
+                }
+            }
+
             BasicProperties properties = new BasicProperties
             {
                 ContentType = serializer.ContentType,
-                MessageId = message.MessageId,
+                MessageId = context.MessageId,
                 AppId = options.ClientName,
                 Timestamp = new AmqpTimestamp(message.CreatedUtc.ToUnixTimeSeconds()),
-                Headers = new Dictionary<string, object>
-                {
-                    [WireHeaders.MessageType] = message.WireName,
-                    [WireHeaders.SourceId] = instanceId,
-                },
+                Headers = headers,
             };
 
             await channel.BasicPublishAsync(
                 exchange: options.ExchangeName,
-                routingKey: message.WireName,
+                routingKey: context.WireName,
                 mandatory: false,
                 basicProperties: properties,
                 body: message.Body,
@@ -564,6 +617,25 @@ namespace Messaging.RabbitMQ
         private void WriteLog(string message)
         {
             Log?.Invoke(this, message);
+        }
+
+        /// <summary>Calls the observer. Its exceptions are logged and never reach the transport.</summary>
+        private void Observe(Action<IMessagingObserver> callback, string callbackName)
+        {
+            try
+            {
+                callback(observer);
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"Observer failed in {callbackName}: {ex.Message}");
+            }
+        }
+
+        private void ObserveConnection(ConnectionRole role, ConnectionStatus status, string reason, Exception error)
+        {
+            ConnectionStateChange change = new ConnectionStateChange(options.BusName, role, status, reason, error);
+            Observe(o => o.OnConnectionChanged(change), nameof(IMessagingObserver.OnConnectionChanged));
         }
 
         private static bool IsOpen(IConnection connection, IChannel channel)

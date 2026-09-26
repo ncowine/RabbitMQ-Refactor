@@ -64,7 +64,7 @@ The legacy projects keep their paths. Legacy apps reference them by relative `Pr
 - `MessageContext`: message ID, correlation ID, headers, bus name, redelivery flag
 - `[Message("wire-name")]`: the message's stable identity on the wire
 - `IMessageSerializer`
-- `IMessagingObserver`: publish, receive, handled, failed and connection-state callbacks
+- `IMessagingObserver`: publish, receive, handled, failed and connection-state callbacks. `OnPublishing` runs on the publishing caller's thread, so ambient context (the current `Activity`, a correlation ID) is available, and it is where headers are added. An observer that throws is logged and never affects delivery.
 
 #### Messaging.RabbitMQ (the transport core)
 
@@ -78,7 +78,7 @@ The legacy projects keep their paths. Legacy apps reference them by relative `Pr
 - Routing belongs to the host, not the contract: `Route<EmployeeUpdated>().To("Legacy", "Modern")`.
 - Async handlers, resolved in a **DI scope per message**. Messages are acked after the handler succeeds.
 - A System.Text.Json serializer configured for output compatible with Newtonsoft (see section 4).
-- An observer built on `ActivitySource`, `Meter` and `ILogger`, following OpenTelemetry messaging semantic conventions. It adds the `traceparent`, `correlation-id` and `message-id` headers.
+- An observer built on `ActivitySource`, `Meter` and `ILogger`, following OpenTelemetry messaging semantic conventions. It adds the `traceparent` and `correlation-id` headers. The message ID needs no header: the core already sends one in the AMQP `message-id` property on every message.
 - Health checks.
 
 #### Legacy adapter (`Common.RabbitMQ`)
@@ -101,7 +101,8 @@ The legacy projects keep their paths. Legacy apps reference them by relative `Pr
 - **Body** = UTF-8 JSON as Newtonsoft 12 produces it with default settings.
 - Legacy client queue: one per instance, `exclusive`, `autoDelete`, non-durable, per-consumer QoS.
 - Legacy runtime behaviour: fan-out to every instance, echo drop, the fire-and-forget outgoing buffer and the current ack behaviour.
-- **New headers are additive only.** Existing receivers read headers by name and ignore unknown ones.
+- **New headers are additive only.** Existing receivers read headers by name and ignore unknown ones. The core writes `event-type` and `source-id` itself, and an observer can't replace them.
+- RabbitMQ.Client adds an `x-dotnet-pub-seq-no` header to every message when publisher confirmation tracking is on. Every build, including the baseline, has always sent it. No receiver reads it.
 
 ### 4. Serialization
 

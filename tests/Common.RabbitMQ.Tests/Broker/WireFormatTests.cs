@@ -18,6 +18,7 @@ namespace Common.RabbitMQ.Tests.Broker
         [Theory]
         [InlineData(CompatBuild.Current)]
         [InlineData(CompatBuild.Baseline)]
+        [InlineData(CompatBuild.Core)]
         public async Task Sends_FrozenRoutingKeyHeadersAndBody(CompatBuild build)
         {
             await using (TestBus bus = await TestBus.Create())
@@ -44,6 +45,7 @@ namespace Common.RabbitMQ.Tests.Broker
         [Theory]
         [InlineData(CompatBuild.Current)]
         [InlineData(CompatBuild.Baseline)]
+        [InlineData(CompatBuild.Core)]
         public async Task Receives_GoldenMessageFromAnotherApplication(CompatBuild build)
         {
             Dictionary<string, object> headers = new Dictionary<string, object>
@@ -58,6 +60,7 @@ namespace Common.RabbitMQ.Tests.Broker
         [Theory]
         [InlineData(CompatBuild.Current)]
         [InlineData(CompatBuild.Baseline)]
+        [InlineData(CompatBuild.Core)]
         public async Task Receives_ByRoutingKey_WhenHeadersAreMissing(CompatBuild build)
         {
             await ReceivesGoldenMessage(build, null);

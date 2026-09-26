@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Tasks;
+using Messaging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Exceptions;
 
@@ -48,12 +49,21 @@ namespace Common.RabbitMQ.Tests.Broker
 
         public ICompatEndpoint AddEndpoint(CompatBuild build, string clientName)
         {
-            ICompatEndpoint endpoint = build == CompatBuild.Current
-                ? (ICompatEndpoint)new CurrentEndpoint(broker, ExchangeName, clientName)
-                : new BaselineEndpoint(broker, ExchangeName, clientName);
+            switch (build)
+            {
+                case CompatBuild.Current:
+                    return Track(new CurrentEndpoint(broker, ExchangeName, clientName));
+                case CompatBuild.Baseline:
+                    return Track(new BaselineEndpoint(broker, ExchangeName, clientName));
+                default:
+                    return AddCoreEndpoint(clientName, null);
+            }
+        }
 
-            endpoints.Add(endpoint);
-            return endpoint;
+        /// <param name="observer">Null for the bus's default: no observer, no extra headers.</param>
+        public CoreEndpoint AddCoreEndpoint(string clientName, IMessagingObserver observer)
+        {
+            return Track(new CoreEndpoint(broker, ExchangeName, clientName, observer));
         }
 
         /// <summary>Waits until every endpoint has its consumer queue bound and its publisher open.</summary>
@@ -108,6 +118,12 @@ namespace Common.RabbitMQ.Tests.Broker
                     return ex.ShutdownReason.ReplyCode;
                 }
             }
+        }
+
+        private T Track<T>(T endpoint) where T : ICompatEndpoint
+        {
+            endpoints.Add(endpoint);
+            return endpoint;
         }
 
         public async ValueTask DisposeAsync()

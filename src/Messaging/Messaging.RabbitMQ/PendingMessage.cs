@@ -5,19 +5,17 @@ namespace Messaging.RabbitMQ
     /// <summary>A serialized message waiting in the outgoing buffer.</summary>
     internal sealed class PendingMessage
     {
-        public PendingMessage(string wireName, byte[] body)
+        public PendingMessage(PublishContext context, byte[] body)
         {
-            WireName = wireName;
+            Context = context;
             Body = body;
-            MessageId = Guid.NewGuid().ToString("N");
             CreatedUtc = DateTimeOffset.UtcNow;
         }
 
-        public string WireName { get; }
+        /// <summary>Wire name, message ID and the observer's extra headers.</summary>
+        public PublishContext Context { get; }
 
         public byte[] Body { get; }
-
-        public string MessageId { get; }
 
         public DateTimeOffset CreatedUtc { get; }
     }

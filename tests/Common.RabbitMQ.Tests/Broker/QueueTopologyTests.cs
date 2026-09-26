@@ -16,6 +16,7 @@ namespace Common.RabbitMQ.Tests.Broker
         [Theory]
         [InlineData(CompatBuild.Current)]
         [InlineData(CompatBuild.Baseline)]
+        [InlineData(CompatBuild.Core)]
         public async Task ConsumerQueue_IsExclusive_AndRemovedWithTheClient(CompatBuild build)
         {
             await using (TestBus bus = await TestBus.Create())
