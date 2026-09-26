@@ -1,19 +1,28 @@
+using Employees.Contracts;
+using Messaging.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
-using WebApi.Hosting;
+using WebApi.Handlers;
 using WebApi.Services;
-using WebApi.Subscribers;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
-builder.Services.AddRabbitMQ(builder.Configuration);
 builder.Services.AddSingleton<EmployeeCache>();
-builder.Services.AddSingleton<EmployeeEventsSubscriber>();
-builder.Services.AddHostedService<RabbitMQHostedService>();
+
+builder.Services.AddMessaging(messaging => messaging
+    .AddBus("Legacy", builder.Configuration.GetSection("Messaging:Buses:Legacy"))
+    .AddBus("Modern", builder.Configuration.GetSection("Messaging:Buses:Modern"))
+    .Route<EmployeeUpdated>().To("Legacy")
+    .Route<EmployeeCacheRefreshed>().To("Modern")
+    .Handle<EmployeeUpdated, EmployeeUpdatedHandler>().From("Legacy")
+    .Handle<EmployeeSaved, EmployeeSavedHandler>().From("Modern"));
+
+builder.Services.AddHealthChecks().AddMessaging();
 
 WebApplication app = builder.Build();
 
 app.MapControllers();
+app.MapHealthChecks("/health");
 
 app.Run();
