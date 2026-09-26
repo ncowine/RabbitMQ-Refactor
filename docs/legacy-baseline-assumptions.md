@@ -47,6 +47,8 @@ ADR 0002 section 2 says subscribers only **check** other applications' exchanges
 - **Changing an exchange's type needs coordination.** An old subscriber that re-declares an exchange as a topic breaks when its owner changes the type. Every old subscriber has to be updated at the same time.
 - **Startup order.** A new subscriber has to cope with an old owner that hasn't declared its exchange yet, and the reverse.
 
+Step 6 proves the first point on a broker: when an owner declares its exchange as `direct`, a legacy subscriber can't connect (`CoreTopologyTests.A16_Consequence_LegacySubscriberCannotJoinANonTopicExchange`). Until A16 is confirmed, keep exchanges that legacy applications subscribe to as `topic`.
+
 Confirming A16 is high on the list.
 
 ## Still unknown

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Messaging.RabbitMQ
 {
@@ -18,8 +19,25 @@ namespace Messaging.RabbitMQ
 
         public string Password { get; set; } = "guest";
 
-        /// <summary>A durable topic exchange, declared on connect.</summary>
+        /// <summary>
+        /// This application's own exchange (ADR 0002, section 2): messages are published here, and it is declared on
+        /// connect with <see cref="ExchangeType"/> and <see cref="ExchangeDurable"/>. Set it explicitly: subscribers bind to it by name.
+        /// </summary>
         public string ExchangeName { get; set; }
+
+        /// <summary><c>topic</c> (the default), <c>direct</c>, <c>fanout</c> or <c>headers</c>.</summary>
+        public string ExchangeType { get; set; } = "topic";
+
+        public bool ExchangeDurable { get; set; } = true;
+
+        /// <summary>
+        /// Also bind the queue to the own exchange, one binding per message type the bus handles (the legacy behaviour).
+        /// On by default.
+        /// </summary>
+        public bool BindOwnExchange { get; set; } = true;
+
+        /// <summary>Other applications' exchanges to receive from. The bus never declares them.</summary>
+        public List<SubscriptionOptions> Subscriptions { get; set; } = new List<SubscriptionOptions>();
 
         /// <summary>Shown in the RabbitMQ management UI, sent as the app-id property and used as the queue name prefix.</summary>
         public string ClientName { get; set; }

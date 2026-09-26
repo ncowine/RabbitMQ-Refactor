@@ -52,6 +52,7 @@ namespace Messaging.Hosting
             if (activity != null)
             {
                 SetTags(activity, "publish", "send", context.BusName, context.WireName, context.MessageId, correlationId);
+                activity.SetTag("messaging.rabbitmq.destination.routing_key", context.RoutingKey);
                 context.Items[ActivityItem] = activity;
 
                 // The span stays open until the broker confirms; it must not become the caller's current activity.
@@ -92,6 +93,7 @@ namespace Messaging.Hosting
             if (activity != null)
             {
                 SetTags(activity, "process", "process", context.BusName, context.WireName, context.MessageId, context.CorrelationId);
+                activity.SetTag("messaging.rabbitmq.destination.routing_key", context.RoutingKey);
                 context.Items[ActivityItem] = activity;
             }
         }

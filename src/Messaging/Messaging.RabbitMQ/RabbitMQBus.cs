@@ -2,11 +2,13 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using RabbitMQ.Client.Exceptions;
 
 namespace Messaging.RabbitMQ
 {
@@ -61,6 +63,16 @@ namespace Messaging.RabbitMQ
             if (string.IsNullOrWhiteSpace(options.BusName) || string.IsNullOrWhiteSpace(options.ExchangeName) || string.IsNullOrWhiteSpace(options.ClientName))
             {
                 throw new ArgumentException("BusName, ExchangeName and ClientName are required.", nameof(options));
+            }
+
+            if (string.IsNullOrWhiteSpace(options.ExchangeType))
+            {
+                throw new ArgumentException("ExchangeType is required.", nameof(options));
+            }
+
+            if (options.Subscriptions.Any(s => s == null || string.IsNullOrWhiteSpace(s.Exchange)))
+            {
+                throw new ArgumentException("Every subscription needs an Exchange.", nameof(options));
             }
 
             this.options = options;
@@ -129,6 +141,17 @@ namespace Messaging.RabbitMQ
         /// </summary>
         public void Enqueue(string wireName, object message)
         {
+            Enqueue(wireName, message, null);
+        }
+
+        /// <summary>
+        /// As <see cref="Enqueue(string, object)"/>, routed with <paramref name="routingKey"/> instead of the wire name
+        /// (ADR 0002, section 3). The wire name still travels in the event-type header, so receivers identify the message
+        /// either way; only subscribers whose bindings match <paramref name="routingKey"/> receive it.
+        /// </summary>
+        /// <param name="routingKey">Null or empty for the wire name.</param>
+        public void Enqueue(string wireName, object message, string routingKey)
+        {
             EnsureNotDisposed();
 
             if (string.IsNullOrWhiteSpace(wireName))
@@ -138,7 +161,8 @@ namespace Messaging.RabbitMQ
 
             byte[] body = serializer.Serialize(message);
 
-            PublishContext context = new PublishContext(wireName, options.BusName, Guid.NewGuid().ToString("N"), message?.GetType());
+            string key = string.IsNullOrEmpty(routingKey) ? wireName : routingKey;
+            PublishContext context = new PublishContext(wireName, options.BusName, Guid.NewGuid().ToString("N"), message?.GetType(), key);
             Observe(o => o.OnPublishing(context), nameof(IMessagingObserver.OnPublishing));
 
             outstandingMessages.Enqueue(new PendingMessage(context, body));
@@ -263,19 +287,23 @@ namespace Messaging.RabbitMQ
 
                 channel = await connection.CreateChannelAsync(cancellationToken: token).ConfigureAwait(false);
                 await DeclareExchange(channel, token).ConfigureAwait(false);
+                foreach (string exchange in SubscribedExchanges())
+                {
+                    await CheckExchangeExists(channel, exchange, token).ConfigureAwait(false);
+                }
+
                 await channel.BasicQosAsync(0, options.PrefetchCount, false, token).ConfigureAwait(false);
 
                 QueueDeclareOk queue = options.QueueMode == QueueMode.Shared
                     ? await DeclareSharedQueue(channel, token).ConfigureAwait(false)
                     : await DeclareInstanceQueue(channel, token).ConfigureAwait(false);
 
-                foreach (MessageRegistration registration in subscriptions.Values)
+                IEnumerable<QueueBinding> bindings = subscriptions.Values
+                    .SelectMany(r => BindingsFor(r.WireName))
+                    .Concat(FixedBindings());
+                foreach (QueueBinding binding in bindings)
                 {
-                    await channel.QueueBindAsync(
-                        queue: queue.QueueName,
-                        exchange: options.ExchangeName,
-                        routingKey: registration.WireName,
-                        cancellationToken: token).ConfigureAwait(false);
+                    await Bind(channel, queue.QueueName, binding, bind: true, token).ConfigureAwait(false);
                 }
 
                 AsyncEventingBasicConsumer consumer = new AsyncEventingBasicConsumer(channel);
@@ -384,13 +412,9 @@ namespace Messaging.RabbitMQ
                     return;
                 }
 
-                if (bind)
+                foreach (QueueBinding binding in BindingsFor(wireName))
                 {
-                    await channel.QueueBindAsync(queueName, options.ExchangeName, wireName, cancellationToken: token).ConfigureAwait(false);
-                }
-                else
-                {
-                    await channel.QueueUnbindAsync(queueName, options.ExchangeName, wireName, cancellationToken: token).ConfigureAwait(false);
+                    await Bind(channel, queueName, binding, bind, token).ConfigureAwait(false);
                 }
             }
             finally
@@ -430,12 +454,15 @@ namespace Messaging.RabbitMQ
                 if (!subscriptions.TryGetValue(wireName, out MessageRegistration registration))
                 {
                     WriteLog($"Ignored unknown event '{wireName}'.");
-                    settlement = shared ? MessageSettlement.DeadLetter : MessageSettlement.Ack;
+
+                    // With only per-type bindings an unknown message is a mistake worth keeping. Pattern and header
+                    // subscriptions bring in unhandled types by design, so those are just skipped.
+                    settlement = shared && !HasFixedBindings() ? MessageSettlement.DeadLetter : MessageSettlement.Ack;
                     return;
                 }
 
                 headers.TryGetValue(WireHeaders.CorrelationId, out string correlationId);
-                context = new MessageContext(wireName, options.BusName, args.BasicProperties?.MessageId, correlationId, args.Redelivered, headers);
+                context = new MessageContext(wireName, options.BusName, args.BasicProperties?.MessageId, correlationId, args.Redelivered, headers, args.Exchange, args.RoutingKey);
                 Observe(o => o.OnReceived(context), nameof(IMessagingObserver.OnReceived));
                 stopwatch = Stopwatch.StartNew();
 
@@ -678,7 +705,7 @@ namespace Messaging.RabbitMQ
 
             await channel.BasicPublishAsync(
                 exchange: options.ExchangeName,
-                routingKey: context.WireName,
+                routingKey: context.RoutingKey,
                 mandatory: false,
                 basicProperties: properties,
                 body: message.Body,
@@ -706,14 +733,100 @@ namespace Messaging.RabbitMQ
             };
         }
 
+        /// <summary>The own exchange, as configured. Only the owner declares an exchange (ADR 0002, section 2).</summary>
         private Task DeclareExchange(IChannel channel, CancellationToken token)
         {
             return channel.ExchangeDeclareAsync(
                 exchange: options.ExchangeName,
-                type: ExchangeType.Topic,
-                durable: true,
+                type: options.ExchangeType,
+                durable: options.ExchangeDurable,
                 autoDelete: false,
                 cancellationToken: token);
+        }
+
+        /// <summary>
+        /// Checks another application's exchange without declaring it. A missing exchange fails the connect attempt, which
+        /// is retried: the owner may simply not have started yet.
+        /// </summary>
+        private static async Task CheckExchangeExists(IChannel channel, string exchange, CancellationToken token)
+        {
+            try
+            {
+                await channel.ExchangeDeclarePassiveAsync(exchange, token).ConfigureAwait(false);
+            }
+            catch (OperationInterruptedException ex) when (ex.ShutdownReason?.ReplyCode == 404)
+            {
+                throw new InvalidOperationException($"Exchange '{exchange}' does not exist yet; waiting for its owner to declare it.", ex);
+            }
+        }
+
+        private IEnumerable<string> SubscribedExchanges()
+        {
+            return options.Subscriptions
+                .Select(s => s.Exchange)
+                .Where(e => !string.Equals(e, options.ExchangeName, StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// The bindings a handled message type brings: its wire name on the own exchange (when enabled), and on every
+        /// subscription that has neither routing keys nor a header match.
+        /// </summary>
+        private IEnumerable<QueueBinding> BindingsFor(string wireName)
+        {
+            if (options.BindOwnExchange)
+            {
+                yield return new QueueBinding(options.ExchangeName, wireName, null);
+            }
+
+            foreach (SubscriptionOptions subscription in options.Subscriptions.Where(IsPerMessageType))
+            {
+                yield return new QueueBinding(subscription.Exchange, wireName, null);
+            }
+        }
+
+        /// <summary>The bindings subscriptions ask for regardless of message types: routing keys and header matches.</summary>
+        private IEnumerable<QueueBinding> FixedBindings()
+        {
+            foreach (SubscriptionOptions subscription in options.Subscriptions.Where(s => !IsPerMessageType(s)))
+            {
+                if (subscription.HeaderMatch.Count > 0)
+                {
+                    Dictionary<string, object> arguments = new Dictionary<string, object>
+                    {
+                        ["x-match"] = subscription.MatchAllHeaders ? "all" : "any",
+                    };
+                    foreach (KeyValuePair<string, string> header in subscription.HeaderMatch)
+                    {
+                        arguments[header.Key] = header.Value;
+                    }
+
+                    yield return new QueueBinding(subscription.Exchange, "", arguments);
+                    continue;
+                }
+
+                foreach (string routingKey in subscription.RoutingKeys)
+                {
+                    yield return new QueueBinding(subscription.Exchange, routingKey, null);
+                }
+            }
+        }
+
+        private bool HasFixedBindings()
+        {
+            return options.Subscriptions.Any(s => !IsPerMessageType(s));
+        }
+
+        private static bool IsPerMessageType(SubscriptionOptions subscription)
+        {
+            return subscription.HeaderMatch.Count == 0 && subscription.RoutingKeys.Count == 0;
+        }
+
+        private static Task Bind(IChannel channel, string queueName, QueueBinding binding, bool bind, CancellationToken token)
+        {
+            return bind
+                ? channel.QueueBindAsync(queueName, binding.Exchange, binding.RoutingKey, binding.Arguments, cancellationToken: token)
+                : channel.QueueUnbindAsync(queueName, binding.Exchange, binding.RoutingKey, binding.Arguments, cancellationToken: token);
         }
 
         private void EnsureNotDisposed()
