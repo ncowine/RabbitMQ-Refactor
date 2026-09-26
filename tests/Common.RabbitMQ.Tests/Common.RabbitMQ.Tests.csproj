@@ -23,6 +23,7 @@
     <ProjectReference Include="..\..\src\Messaging\Messaging.Abstractions\Messaging.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\Messaging\Messaging.RabbitMQ\Messaging.RabbitMQ.csproj" />
     <ProjectReference Include="..\..\src\Common.Events\Common.Events.csproj" />
+    <ProjectReference Include="..\..\src\Common.RabbitMQ.Configuration\Common.RabbitMQ.Configuration.csproj" />
     <ProjectReference Include="..\Fixtures\Compat.Events\Compat.Events.csproj" />
     <ProjectReference Include="..\Fixtures\Common.RabbitMQ.Baseline\Common.RabbitMQ.Baseline.csproj" Aliases="baseline" />
     <ProjectReference Include="..\Fixtures\Compat.Events.Baseline\Compat.Events.Baseline.csproj" Aliases="baseline" />
@@ -51,6 +52,14 @@
 
   <ItemGroup Condition="'$(TargetFramework)' != 'net8.0'">
     <Compile Remove="Hosting\**" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <Reference Include="System.Configuration" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="System.Configuration.ConfigurationManager" />
   </ItemGroup>
 
 </Project>

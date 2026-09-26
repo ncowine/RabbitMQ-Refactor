@@ -16,7 +16,7 @@ namespace Common.RabbitMQ
     /// Prism event on the <see cref="IEventAggregator"/>. Bodies are Newtonsoft JSON, as the legacy apps expect.
     /// </para>
     /// </summary>
-    public class RabbitMQService : IRabbitMQService
+    public class RabbitMQService : IRabbitMQService, IRoutingKeyPublisher
     {
         private readonly IEventAggregator eventAggregator;
         private readonly RemoteEventRegistry registry;
@@ -80,12 +80,34 @@ namespace Common.RabbitMQ
             WriteLog($"Initialized with {registrations.Count} event(s) on {config.HostName}:{config.Port}{FormatVirtualHost(config.VirtualHost)} exchange '{config.ExchangeName}'.");
         }
 
+        /// <summary>
+        /// Queues <paramref name="payload"/> as <paramref name="eventType"/>, routed with the event's full name or with its
+        /// entry in <see cref="RabbitMQConfig.RoutingKeys"/>.
+        /// </summary>
         public void Publish(Type eventType, object payload)
         {
             EnsureInitialized();
 
             RemoteEventDescriptor descriptor = GetDescriptorForThisBus(eventType);
-            bus.Enqueue(descriptor.EventName, payload);
+            config.RoutingKeys.TryGetValue(descriptor.EventName, out string routingKey);
+            bus.Enqueue(descriptor.EventName, payload, routingKey);
+        }
+
+        /// <summary>
+        /// As <see cref="Publish(Type, object)"/>, routed with <paramref name="routingKey"/>. The event-type header still
+        /// carries the full name, so every receiver identifies the event; only subscribers that bind the key receive it.
+        /// </summary>
+        public void Publish(Type eventType, object payload, string routingKey)
+        {
+            EnsureInitialized();
+
+            if (string.IsNullOrWhiteSpace(routingKey))
+            {
+                throw new ArgumentException("A routing key is required.", nameof(routingKey));
+            }
+
+            RemoteEventDescriptor descriptor = GetDescriptorForThisBus(eventType);
+            bus.Enqueue(descriptor.EventName, payload, routingKey);
         }
 
         /// <summary>
@@ -137,6 +159,11 @@ namespace Common.RabbitMQ
                 OutstandingPollInterval = TimeSpan.FromMilliseconds(config.OutstandingPollIntervalMilliseconds),
                 PrefetchCount = (ushort)config.PrefetchCount,
                 Heartbeat = TimeSpan.FromSeconds(config.HeartbeatSeconds),
+                ExchangeType = string.IsNullOrWhiteSpace(config.ExchangeType) ? "topic" : config.ExchangeType,
+                Subscriptions = config.Subscriptions
+                    .Where(s => s != null)
+                    .Select(s => new SubscriptionOptions { Exchange = s.Exchange, RoutingKeys = new List<string>(s.RoutingKeys) })
+                    .ToList(),
             };
         }
 
@@ -152,7 +179,8 @@ namespace Common.RabbitMQ
                 throw new ArgumentException($"{eventType.FullName} is not a remote event. Mark it with [RemoteEvent].", nameof(eventType));
             }
 
-            if (!string.Equals(descriptor.BusName, config.BusName, StringComparison.OrdinalIgnoreCase))
+            // Unassigned events (RemoteEventRegistry.Add without a bus) belong to every bus.
+            if (descriptor.BusName != null && !string.Equals(descriptor.BusName, config.BusName, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException(
                     $"{eventType.Name} belongs to bus '{descriptor.BusName}', not '{config.BusName}'.");

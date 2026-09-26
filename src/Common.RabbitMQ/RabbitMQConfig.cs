@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 namespace Common.RabbitMQ
 {
     /// <summary>
@@ -32,5 +35,20 @@ namespace Common.RabbitMQ
         public int PrefetchCount { get; set; } = 50;
 
         public int HeartbeatSeconds { get; set; } = 30;
+
+        /// <summary>
+        /// The type of <see cref="ExchangeName"/>, declared on connect: <c>topic</c> (the default), <c>direct</c>,
+        /// <c>fanout</c> or <c>headers</c> (ADR 0002). Keep <c>topic</c> while legacy applications subscribe to it.
+        /// </summary>
+        public string ExchangeType { get; set; } = "topic";
+
+        /// <summary>Other applications' exchanges to receive from (ADR 0002). They are checked, never declared.</summary>
+        public List<RabbitMQSubscription> Subscriptions { get; set; } = new List<RabbitMQSubscription>();
+
+        /// <summary>
+        /// Default routing key per event full name, used by <c>PublishRemote</c> instead of the full name (ADR 0002,
+        /// section 3). Events not listed use their full name.
+        /// </summary>
+        public Dictionary<string, string> RoutingKeys { get; set; } = new Dictionary<string, string>(StringComparer.Ordinal);
     }
 }

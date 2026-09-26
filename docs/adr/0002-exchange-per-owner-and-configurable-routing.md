@@ -150,6 +150,17 @@ These follow ADR 0001's steps 0–3b, which are done. Each can be released on it
 5. **Baseline.** Accept this ADR. Obtain the real legacy library, or its exact behaviour, and rebuild the frozen baseline and broker tests around the real topology.
 6. **Core topology.** Owned exchange with configurable type; subscription list with passive checks of foreign exchanges; routing key per message; `event-type` always sent. Per-instance and shared queue modes unchanged.
 7. **Legacy adapter.** Discovery by assembly, `PublishRemote` on `PubSubEvent<T>`, `PublishRemoteTo`, and App.config support for the exchange, `<subscribe>` and `<route>`. The public API test changes from "exact match" to "additions only".
+   *As built (2026-09-26):*
+   - **Built:**
+     - `RemoteEventRegistry.Add(assembly, bus = null)`. An event without a bus belongs to every bus. With several buses, the router refuses to publish it and says why.
+     - `PublishRemote` on `PubSubEvent<T>`, `PublishRemoteTo`, and `IRoutingKeyPublisher`, a separate interface so `IRabbitMQService` stays unchanged.
+     - In `RabbitMQConfig`: `ExchangeType`, `Subscriptions` and `RoutingKeys` (a default key per event).
+     - In App.config: `exchangeType`, plus `<subscriptions>` and `<routes>` inside `<bus>`.
+     - The public API test now checks for "nothing removed, only listed additions, one public constructor".
+   - **Deliberately left out until needed:**
+     - listing event assemblies in App.config (they are registered in code, one line per assembly);
+     - header matches in App.config;
+     - namespace patterns and `{Field}` placeholders in `<route>` (exact event names only).
 8. **Modern clients.** `AddConnection`, `Subscribe` and `WithRoutingKey` in `Messaging.Hosting`, and opt-in telemetry. Migrate this repository's net8 WPF app to plain classes as the reference, and add plain-class twins for the common events.
 
 ADR 0001's optional step 4 (`SubscribeOnly`, `[Obsolete]` on `PublishRemote`, outbox) stays optional and comes after these.
