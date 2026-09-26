@@ -1,47 +1,29 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Text;
-using System.Threading;
+using System.Linq;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
+using Messaging.RabbitMQ;
 using Prism.Events;
-using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
 
 namespace Common.RabbitMQ
 {
     /// <summary>
-    /// One connection to one bus (virtual host + exchange).
+    /// One connection to one bus (virtual host + exchange), for Prism applications.
     /// <para>
-    /// <see cref="Init"/> starts three fire-and-forget loops:
-    /// <list type="bullet">
-    /// <item><see cref="ConnectConsumer"/> - connects, creates this client's queue, binds the registered events and
-    /// then keeps checking for a dropped connection, reconnecting when needed.</item>
-    /// <item><see cref="ConnectPublisher"/> - same, for the publishing connection.</item>
-    /// <item><see cref="OutstandingQueue"/> - sends queued messages whenever the publisher is connected.</item>
-    /// </list>
+    /// A façade over <see cref="RabbitMQBus"/> (ADR 0001): <see cref="Init"/> starts the bus with every remote event
+    /// of this bus subscribed, <see cref="Publish"/> buffers a message for it, and received messages are raised as their
+    /// Prism event on the <see cref="IEventAggregator"/>. Bodies are Newtonsoft JSON, as the legacy apps expect.
     /// </para>
-    /// Received messages are resolved to their Prism event and raised on the <see cref="IEventAggregator"/>.
     /// </summary>
     public class RabbitMQService : IRabbitMQService
     {
         private readonly IEventAggregator eventAggregator;
         private readonly RemoteEventRegistry registry;
-        private readonly ConcurrentQueue<OutgoingMessage> outstandingMessages = new ConcurrentQueue<OutgoingMessage>();
-        private readonly ConcurrentDictionary<string, RemoteEventDescriptor> registeredEvents =
-            new ConcurrentDictionary<string, RemoteEventDescriptor>(StringComparer.Ordinal);
-        private readonly SemaphoreSlim consumerLock = new SemaphoreSlim(1, 1);
         private readonly string instanceId = Guid.NewGuid().ToString("N");
 
         private RabbitMQConfig config;
-        private CancellationTokenSource cancellation;
-        private IConnection consumerConnection;
-        private IChannel consumerChannel;
-        private string consumerQueueName;
-        private IConnection publisherConnection;
-        private IChannel publisherChannel;
+        private RabbitMQBus bus;
         private bool disposed;
 
         public RabbitMQService(IEventAggregator eventAggregator, RemoteEventRegistry registry)
@@ -57,11 +39,11 @@ namespace Common.RabbitMQ
 
         public string InstanceId => instanceId;
 
-        public bool IsConsumerConnected => IsOpen(consumerConnection, consumerChannel);
+        public bool IsConsumerConnected => bus != null && bus.IsConsumerConnected;
 
-        public bool IsPublisherConnected => IsOpen(publisherConnection, publisherChannel);
+        public bool IsPublisherConnected => bus != null && bus.IsPublisherConnected;
 
-        public int OutstandingCount => outstandingMessages.Count;
+        public int OutstandingCount => bus?.OutstandingCount ?? 0;
 
         public void Init(RabbitMQConfig config)
         {
@@ -87,19 +69,15 @@ namespace Common.RabbitMQ
 
             this.config = config;
 
-            foreach (RemoteEventDescriptor descriptor in registry.GetByBus(config.BusName))
-            {
-                registeredEvents[descriptor.EventName] = descriptor;
-            }
+            List<MessageRegistration> registrations = registry.GetByBus(config.BusName)
+                .Select(d => new MessageRegistration(d.EventName, d.PayloadType))
+                .ToList();
 
-            cancellation = new CancellationTokenSource();
-            CancellationToken token = cancellation.Token;
+            bus = new RabbitMQBus(CreateOptions(config), NewtonsoftMessageSerializer.Instance, new PrismDispatcher(eventAggregator, registry));
+            bus.Log += OnBusLog;
+            bus.Start(registrations);
 
-            Task.Run(() => ConnectConsumer(token));
-            Task.Run(() => ConnectPublisher(token));
-            Task.Run(() => OutstandingQueue(token));
-
-            WriteLog($"Initialized with {registeredEvents.Count} event(s) on {config.HostName}:{config.Port}{FormatVirtualHost(config.VirtualHost)} exchange '{config.ExchangeName}'.");
+            WriteLog($"Initialized with {registrations.Count} event(s) on {config.HostName}:{config.Port}{FormatVirtualHost(config.VirtualHost)} exchange '{config.ExchangeName}'.");
         }
 
         public void Publish(Type eventType, object payload)
@@ -107,9 +85,7 @@ namespace Common.RabbitMQ
             EnsureInitialized();
 
             RemoteEventDescriptor descriptor = GetDescriptorForThisBus(eventType);
-            byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload));
-
-            outstandingMessages.Enqueue(new OutgoingMessage(descriptor.EventName, body));
+            bus.Enqueue(descriptor.EventName, payload);
         }
 
         /// <summary>
@@ -121,13 +97,7 @@ namespace Common.RabbitMQ
             EnsureInitialized();
 
             RemoteEventDescriptor descriptor = GetDescriptorForThisBus(eventType);
-            if (!registeredEvents.TryAdd(descriptor.EventName, descriptor))
-            {
-                return;
-            }
-
-            // If not connected the binding is created on the next connect.
-            await BindOrUnbind(descriptor, bind: true, cancellation.Token).ConfigureAwait(false);
+            await bus.Subscribe(new MessageRegistration(descriptor.EventName, descriptor.PayloadType)).ConfigureAwait(false);
         }
 
         /// <summary>Stops receiving <paramref name="eventType"/> from the bus. Publishing is not affected.</summary>
@@ -136,12 +106,7 @@ namespace Common.RabbitMQ
             EnsureInitialized();
 
             RemoteEventDescriptor descriptor = GetDescriptorForThisBus(eventType);
-            if (!registeredEvents.TryRemove(descriptor.EventName, out RemoteEventDescriptor removed))
-            {
-                return;
-            }
-
-            await BindOrUnbind(removed, bind: false, cancellation.Token).ConfigureAwait(false);
+            await bus.Unsubscribe(descriptor.EventName).ConfigureAwait(false);
         }
 
         public void Dispose()
@@ -152,400 +117,27 @@ namespace Common.RabbitMQ
             }
 
             disposed = true;
-
-            if (cancellation == null)
-            {
-                return;
-            }
-
-            cancellation.Cancel();
-
-            if (!outstandingMessages.IsEmpty)
-            {
-                WriteLog($"Shutting down with {outstandingMessages.Count} unsent message(s).");
-            }
-
-            try
-            {
-                // Run on the thread pool so a UI thread calling Dispose can't deadlock.
-                Task.Run(async () =>
-                {
-                    await CloseConsumer().ConfigureAwait(false);
-                    await ClosePublisher().ConfigureAwait(false);
-                }).Wait(TimeSpan.FromSeconds(5));
-            }
-            catch (Exception ex)
-            {
-                WriteLog($"Error while closing connections: {ex.Message}");
-            }
-
-            cancellation.Dispose();
+            bus?.Dispose();
         }
 
-        #region Consumer
-
-        private async Task ConnectConsumer(CancellationToken token)
+        private RabbitMQBusOptions CreateOptions(RabbitMQConfig config)
         {
-            while (!token.IsCancellationRequested)
+            return new RabbitMQBusOptions
             {
-                try
-                {
-                    if (!IsOpen(consumerConnection, consumerChannel))
-                    {
-                        await CloseConsumer().ConfigureAwait(false);
-                        await OpenConsumer(token).ConfigureAwait(false);
-                        WriteLog($"Consumer connected, queue '{consumerQueueName}'.");
-                    }
-                }
-                catch (OperationCanceledException) when (token.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    WriteLog($"Consumer connection failed: {ex.Message}");
-                }
-
-                if (!await Delay(TimeSpan.FromSeconds(config.ReconnectDelaySeconds), token).ConfigureAwait(false))
-                {
-                    break;
-                }
-            }
-        }
-
-        private async Task OpenConsumer(CancellationToken token)
-        {
-            await consumerLock.WaitAsync(token).ConfigureAwait(false);
-
-            IConnection connection = null;
-            IChannel channel = null;
-            try
-            {
-                connection = await CreateConnectionFactory()
-                    .CreateConnectionAsync($"{config.ClientName} [{config.BusName}] consumer", token)
-                    .ConfigureAwait(false);
-                connection.ConnectionShutdownAsync += OnConsumerConnectionShutdown;
-
-                channel = await connection.CreateChannelAsync(cancellationToken: token).ConfigureAwait(false);
-                await DeclareExchange(channel, token).ConfigureAwait(false);
-                await channel.BasicQosAsync(0, (ushort)config.PrefetchCount, false, token).ConfigureAwait(false);
-
-                // One queue per running client: every client gets every event, and the queue goes away with the client.
-                QueueDeclareOk queue = await channel.QueueDeclareAsync(
-                    queue: $"{config.ClientName}.{config.BusName}.{instanceId}".ToLowerInvariant(),
-                    durable: false,
-                    exclusive: true,
-                    autoDelete: true,
-                    cancellationToken: token).ConfigureAwait(false);
-
-                foreach (RemoteEventDescriptor descriptor in registeredEvents.Values)
-                {
-                    await channel.QueueBindAsync(
-                        queue: queue.QueueName,
-                        exchange: config.ExchangeName,
-                        routingKey: descriptor.EventName,
-                        cancellationToken: token).ConfigureAwait(false);
-                }
-
-                AsyncEventingBasicConsumer consumer = new AsyncEventingBasicConsumer(channel);
-                consumer.ReceivedAsync += OnMessageReceived;
-                await channel.BasicConsumeAsync(
-                    queue: queue.QueueName,
-                    autoAck: false,
-                    consumer: consumer,
-                    cancellationToken: token).ConfigureAwait(false);
-
-                consumerConnection = connection;
-                consumerChannel = channel;
-                consumerQueueName = queue.QueueName;
-            }
-            catch
-            {
-                await CloseQuietly(channel, connection).ConfigureAwait(false);
-                throw;
-            }
-            finally
-            {
-                consumerLock.Release();
-            }
-        }
-
-        private async Task CloseConsumer()
-        {
-            IConnection connection;
-            IChannel channel;
-
-            await consumerLock.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                connection = consumerConnection;
-                channel = consumerChannel;
-                consumerConnection = null;
-                consumerChannel = null;
-                consumerQueueName = null;
-            }
-            finally
-            {
-                consumerLock.Release();
-            }
-
-            if (connection != null)
-            {
-                connection.ConnectionShutdownAsync -= OnConsumerConnectionShutdown;
-            }
-
-            await CloseQuietly(channel, connection).ConfigureAwait(false);
-        }
-
-        private async Task BindOrUnbind(RemoteEventDescriptor descriptor, bool bind, CancellationToken token)
-        {
-            await consumerLock.WaitAsync(token).ConfigureAwait(false);
-            try
-            {
-                IChannel channel = consumerChannel;
-                string queueName = consumerQueueName;
-                if (channel == null || !channel.IsOpen || queueName == null)
-                {
-                    return;
-                }
-
-                if (bind)
-                {
-                    await channel.QueueBindAsync(queueName, config.ExchangeName, descriptor.EventName, cancellationToken: token).ConfigureAwait(false);
-                }
-                else
-                {
-                    await channel.QueueUnbindAsync(queueName, config.ExchangeName, descriptor.EventName, cancellationToken: token).ConfigureAwait(false);
-                }
-            }
-            finally
-            {
-                consumerLock.Release();
-            }
-        }
-
-        private async Task OnMessageReceived(object sender, BasicDeliverEventArgs args)
-        {
-            IChannel channel = ((AsyncEventingBasicConsumer)sender).Channel;
-
-            try
-            {
-                IDictionary<string, object> headers = args.BasicProperties?.Headers;
-
-                // Our own message coming back - local subscribers were already invoked by PublishRemote.
-                if (ReadHeader(headers, MessageHeaders.SourceId) == instanceId)
-                {
-                    return;
-                }
-
-                string eventName = ReadHeader(headers, MessageHeaders.EventType) ?? args.RoutingKey;
-                if (!registeredEvents.TryGetValue(eventName, out RemoteEventDescriptor descriptor))
-                {
-                    WriteLog($"Ignored unknown event '{eventName}'.");
-                    return;
-                }
-
-                string json = Encoding.UTF8.GetString(args.Body.ToArray());
-                object payload = JsonConvert.DeserializeObject(json, descriptor.PayloadType);
-
-                descriptor.PublishLocal(eventAggregator, payload);
-            }
-            catch (Exception ex)
-            {
-                // Acked anyway so a bad message can't be redelivered forever.
-                WriteLog($"Failed to handle message '{args.RoutingKey}': {ex.Message}");
-            }
-            finally
-            {
-                try
-                {
-                    if (channel.IsOpen)
-                    {
-                        await channel.BasicAckAsync(args.DeliveryTag, false).ConfigureAwait(false);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    WriteLog($"Failed to ack message: {ex.Message}");
-                }
-            }
-        }
-
-        private Task OnConsumerConnectionShutdown(object sender, ShutdownEventArgs args)
-        {
-            WriteLog($"Consumer connection lost: {args.ReplyText}");
-            return Task.CompletedTask;
-        }
-
-        #endregion
-
-        #region Publisher
-
-        private async Task ConnectPublisher(CancellationToken token)
-        {
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    if (!IsOpen(publisherConnection, publisherChannel))
-                    {
-                        await ClosePublisher().ConfigureAwait(false);
-                        await OpenPublisher(token).ConfigureAwait(false);
-                        WriteLog("Publisher connected.");
-                    }
-                }
-                catch (OperationCanceledException) when (token.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    WriteLog($"Publisher connection failed: {ex.Message}");
-                }
-
-                if (!await Delay(TimeSpan.FromSeconds(config.ReconnectDelaySeconds), token).ConfigureAwait(false))
-                {
-                    break;
-                }
-            }
-        }
-
-        private async Task OpenPublisher(CancellationToken token)
-        {
-            IConnection connection = null;
-            IChannel channel = null;
-            try
-            {
-                connection = await CreateConnectionFactory()
-                    .CreateConnectionAsync($"{config.ClientName} [{config.BusName}] publisher", token)
-                    .ConfigureAwait(false);
-                connection.ConnectionShutdownAsync += OnPublisherConnectionShutdown;
-
-                // With confirmation tracking BasicPublishAsync only completes once the broker has the message.
-                CreateChannelOptions options = new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true);
-                channel = await connection.CreateChannelAsync(options, token).ConfigureAwait(false);
-                await DeclareExchange(channel, token).ConfigureAwait(false);
-
-                publisherConnection = connection;
-                publisherChannel = channel;
-            }
-            catch
-            {
-                await CloseQuietly(channel, connection).ConfigureAwait(false);
-                throw;
-            }
-        }
-
-        private async Task ClosePublisher()
-        {
-            IConnection connection = publisherConnection;
-            IChannel channel = publisherChannel;
-            publisherConnection = null;
-            publisherChannel = null;
-
-            if (connection != null)
-            {
-                connection.ConnectionShutdownAsync -= OnPublisherConnectionShutdown;
-            }
-
-            await CloseQuietly(channel, connection).ConfigureAwait(false);
-        }
-
-        private Task OnPublisherConnectionShutdown(object sender, ShutdownEventArgs args)
-        {
-            WriteLog($"Publisher connection lost: {args.ReplyText}");
-            return Task.CompletedTask;
-        }
-
-        #endregion
-
-        #region Outstanding queue
-
-        private async Task OutstandingQueue(CancellationToken token)
-        {
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    IChannel channel = publisherChannel;
-                    if (channel != null && channel.IsOpen && outstandingMessages.TryPeek(out OutgoingMessage message))
-                    {
-                        await PublishMessage(channel, message, token).ConfigureAwait(false);
-
-                        // Only removed once the broker confirmed it; on failure it is retried.
-                        outstandingMessages.TryDequeue(out OutgoingMessage published);
-                        continue;
-                    }
-                }
-                catch (OperationCanceledException) when (token.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    WriteLog($"Publish failed, message kept in outstanding queue: {ex.Message}");
-                }
-
-                if (!await Delay(TimeSpan.FromMilliseconds(config.OutstandingPollIntervalMilliseconds), token).ConfigureAwait(false))
-                {
-                    break;
-                }
-            }
-        }
-
-        private async Task PublishMessage(IChannel channel, OutgoingMessage message, CancellationToken token)
-        {
-            BasicProperties properties = new BasicProperties
-            {
-                ContentType = "application/json",
-                MessageId = message.MessageId,
-                AppId = config.ClientName,
-                Timestamp = new AmqpTimestamp(message.CreatedUtc.ToUnixTimeSeconds()),
-                Headers = new Dictionary<string, object>
-                {
-                    [MessageHeaders.EventType] = message.EventName,
-                    [MessageHeaders.SourceId] = instanceId,
-                },
-            };
-
-            await channel.BasicPublishAsync(
-                exchange: config.ExchangeName,
-                routingKey: message.EventName,
-                mandatory: false,
-                basicProperties: properties,
-                body: message.Body,
-                cancellationToken: token).ConfigureAwait(false);
-        }
-
-        #endregion
-
-        #region Helpers
-
-        private ConnectionFactory CreateConnectionFactory()
-        {
-            return new ConnectionFactory
-            {
+                BusName = config.BusName,
                 HostName = config.HostName,
                 Port = config.Port,
                 VirtualHost = config.VirtualHost,
                 UserName = config.UserName,
                 Password = config.Password,
-                RequestedHeartbeat = TimeSpan.FromSeconds(config.HeartbeatSeconds),
-
-                // Reconnecting is done by ConnectConsumer / ConnectPublisher.
-                AutomaticRecoveryEnabled = false,
-                TopologyRecoveryEnabled = false,
+                ExchangeName = config.ExchangeName,
+                ClientName = config.ClientName,
+                InstanceId = instanceId,
+                ReconnectDelay = TimeSpan.FromSeconds(config.ReconnectDelaySeconds),
+                OutstandingPollInterval = TimeSpan.FromMilliseconds(config.OutstandingPollIntervalMilliseconds),
+                PrefetchCount = (ushort)config.PrefetchCount,
+                Heartbeat = TimeSpan.FromSeconds(config.HeartbeatSeconds),
             };
-        }
-
-        private Task DeclareExchange(IChannel channel, CancellationToken token)
-        {
-            return channel.ExchangeDeclareAsync(
-                exchange: config.ExchangeName,
-                type: ExchangeType.Topic,
-                durable: true,
-                autoDelete: false,
-                cancellationToken: token);
         }
 
         private RemoteEventDescriptor GetDescriptorForThisBus(Type eventType)
@@ -582,84 +174,22 @@ namespace Common.RabbitMQ
             }
         }
 
+        private void OnBusLog(object sender, string message)
+        {
+            WriteLog(message);
+        }
+
         private void WriteLog(string message)
         {
             Trace.WriteLine($"[RabbitMQ:{BusName}] {message}");
+
+            // Applications cast the sender to RabbitMQService, so it must be this façade, not the bus.
             Log?.Invoke(this, message);
-        }
-
-        private static bool IsOpen(IConnection connection, IChannel channel)
-        {
-            return connection != null && connection.IsOpen && channel != null && channel.IsOpen;
-        }
-
-        private static string ReadHeader(IDictionary<string, object> headers, string name)
-        {
-            if (headers == null || !headers.TryGetValue(name, out object value) || value == null)
-            {
-                return null;
-            }
-
-            // String headers arrive as byte[] from the broker.
-            return value is byte[] bytes ? Encoding.UTF8.GetString(bytes) : value.ToString();
         }
 
         private static string FormatVirtualHost(string virtualHost)
         {
             return virtualHost == "/" ? "/" : "/" + virtualHost;
         }
-
-        /// <returns>False when cancelled.</returns>
-        private static async Task<bool> Delay(TimeSpan delay, CancellationToken token)
-        {
-            try
-            {
-                await Task.Delay(delay, token).ConfigureAwait(false);
-                return true;
-            }
-            catch (OperationCanceledException)
-            {
-                return false;
-            }
-        }
-
-        private static async Task CloseQuietly(IChannel channel, IConnection connection)
-        {
-            try
-            {
-                if (channel != null)
-                {
-                    if (channel.IsOpen)
-                    {
-                        await channel.CloseAsync().ConfigureAwait(false);
-                    }
-
-                    channel.Dispose();
-                }
-            }
-            catch
-            {
-                // Already broken; nothing to do.
-            }
-
-            try
-            {
-                if (connection != null)
-                {
-                    if (connection.IsOpen)
-                    {
-                        await connection.CloseAsync().ConfigureAwait(false);
-                    }
-
-                    connection.Dispose();
-                }
-            }
-            catch
-            {
-                // Already broken; nothing to do.
-            }
-        }
-
-        #endregion
     }
 }

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Legacy adapter: the Prism API over the Messaging.RabbitMQ core (ADR 0001, section 1). Public API frozen. -->
   <PropertyGroup>
     <TargetFrameworks>net472;net8.0</TargetFrameworks>
   </PropertyGroup>
@@ -7,7 +8,10 @@
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" />
     <PackageReference Include="Prism.Core" />
-    <PackageReference Include="RabbitMQ.Client" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Messaging\Messaging.RabbitMQ\Messaging.RabbitMQ.csproj" />
   </ItemGroup>
 
 </Project>

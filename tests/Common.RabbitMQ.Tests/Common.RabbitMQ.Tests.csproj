@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Common.RabbitMQ\Common.RabbitMQ.csproj" />
+    <ProjectReference Include="..\..\src\Messaging\Messaging.Abstractions\Messaging.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Messaging\Messaging.RabbitMQ\Messaging.RabbitMQ.csproj" />
     <ProjectReference Include="..\..\src\Common.Events\Common.Events.csproj" />
     <ProjectReference Include="..\Fixtures\Compat.Events\Compat.Events.csproj" />
     <ProjectReference Include="..\Fixtures\Common.RabbitMQ.Baseline\Common.RabbitMQ.Baseline.csproj" Aliases="baseline" />
