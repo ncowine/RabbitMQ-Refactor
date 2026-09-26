@@ -1,4 +1,6 @@
+using System;
 using System.Configuration;
+using System.Linq;
 
 namespace Common.RabbitMQ.Configuration
 {
@@ -40,6 +42,18 @@ namespace Common.RabbitMQ.Configuration
         [ConfigurationProperty("heartbeatSeconds", DefaultValue = 30)]
         public int HeartbeatSeconds => (int)this["heartbeatSeconds"];
 
+        /// <summary>The own exchange's type (ADR 0002): topic, direct, fanout or headers.</summary>
+        [ConfigurationProperty("exchangeType", DefaultValue = "topic")]
+        public string ExchangeType => (string)this["exchangeType"];
+
+        /// <summary><c>&lt;subscriptions&gt;&lt;subscribe exchange="AppA" routingKeys="..." /&gt;&lt;/subscriptions&gt;</c></summary>
+        [ConfigurationProperty("subscriptions")]
+        public SubscriptionElementCollection Subscriptions => (SubscriptionElementCollection)this["subscriptions"];
+
+        /// <summary><c>&lt;routes&gt;&lt;route event="Full.Name" routingKey="..." /&gt;&lt;/routes&gt;</c></summary>
+        [ConfigurationProperty("routes")]
+        public RouteElementCollection Routes => (RouteElementCollection)this["routes"];
+
         public RabbitMQConfig ToRabbitMQConfig()
         {
             return new RabbitMQConfig
@@ -56,6 +70,9 @@ namespace Common.RabbitMQ.Configuration
                 OutstandingPollIntervalMilliseconds = OutstandingPollIntervalMilliseconds,
                 PrefetchCount = PrefetchCount,
                 HeartbeatSeconds = HeartbeatSeconds,
+                ExchangeType = ExchangeType,
+                Subscriptions = Subscriptions.Cast<SubscriptionElement>().Select(s => s.ToSubscription()).ToList(),
+                RoutingKeys = Routes.Cast<RouteElement>().ToDictionary(r => r.Event, r => r.RoutingKey, StringComparer.Ordinal),
             };
         }
     }

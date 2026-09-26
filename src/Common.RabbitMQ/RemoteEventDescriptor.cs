@@ -34,6 +34,7 @@ namespace Common.RabbitMQ
 
         public Type PayloadType { get; }
 
+        /// <summary>Null for an event registered with <see cref="RemoteEventRegistry.Add"/> without a bus: it belongs to every bus.</summary>
         public string BusName { get; }
 
         /// <summary>

@@ -6,7 +6,15 @@ namespace Common.RabbitMQ.Configuration
     /// App.config section:
     /// <code>
     /// &lt;rabbitMQ&gt;
-    ///   &lt;bus name="Legacy" hostName="..." virtualHost="legacy" exchangeName="legacy.events" ... /&gt;
+    ///   &lt;bus name="AppB" exchangeName="AppB" exchangeType="topic" clientName="AppB" ...&gt;
+    ///     &lt;subscriptions&gt;
+    ///       &lt;subscribe exchange="AppA" /&gt;                                   &lt;!-- one binding per known event --&gt;
+    ///       &lt;subscribe exchange="AppC" routingKeys="orders.*.saved" /&gt;      &lt;!-- patterns --&gt;
+    ///     &lt;/subscriptions&gt;
+    ///     &lt;routes&gt;
+    ///       &lt;route event="AppB.Events.CustomerChanged" routingKey="customers.eu.changed" /&gt;
+    ///     &lt;/routes&gt;
+    ///   &lt;/bus&gt;
     /// &lt;/rabbitMQ&gt;
     /// </code>
     /// </summary>

@@ -22,6 +22,12 @@ namespace Common.RabbitMQ.Tests.PublicApi
             {
                 api.Add(DescribeType(type));
 
+                // One line per interface, so implementing an extra interface reads as an addition, not a change.
+                foreach (Type implemented in type.GetInterfaces())
+                {
+                    api.Add($"implements {Name(type)} : {Name(implemented)}");
+                }
+
                 foreach (ConstructorInfo constructor in type.GetConstructors(Declared).Where(c => IsVisible(c)))
                 {
                     api.Add($"ctor {Name(type)}({Parameters(constructor)})");
@@ -68,7 +74,6 @@ namespace Common.RabbitMQ.Tests.PublicApi
                 bases.Add(Name(type.BaseType));
             }
 
-            bases.AddRange(type.GetInterfaces().Select(Name).OrderBy(n => n));
             string attributes = string.Join("", type.GetCustomAttributesData().Select(a => $"[{Name(a.AttributeType)}({string.Join(", ", a.ConstructorArguments.Select(c => c.ToString()))})]"));
 
             return $"{attributes}{modifiers}{kind} {Name(type)}" + (bases.Count > 0 ? " : " + string.Join(", ", bases) : "");

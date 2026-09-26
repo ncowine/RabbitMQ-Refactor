@@ -20,6 +20,7 @@ namespace Common.RabbitMQ.Tests.LegacyModel
     {
         private readonly List<LegacyApp> apps = new List<LegacyApp>();
         private readonly List<CoreApp> coreApps = new List<CoreApp>();
+        private readonly List<AdapterApp> adapterApps = new List<AdapterApp>();
         private readonly List<string> durableQueues = new List<string>();
         private readonly HashSet<string> exchanges = new HashSet<string>(StringComparer.Ordinal);
         private readonly string suffix = Guid.NewGuid().ToString("N").Substring(0, 12);
@@ -69,6 +70,22 @@ namespace Common.RabbitMQ.Tests.LegacyModel
             CoreApp instance = new CoreApp(Broker, Exchange(app), app, configure, observer);
             coreApps.Add(instance);
             return instance;
+        }
+
+        /// <summary>
+        /// Starts an application on the current <c>Common.RabbitMQ</c> adapter with its own exchange named after
+        /// <paramref name="app"/> and its events registered by assembly.
+        /// </summary>
+        public AdapterApp StartAdapter(string app, Action<global::Common.RabbitMQ.RabbitMQConfig> configure, params Assembly[] eventAssemblies)
+        {
+            AdapterApp instance = new AdapterApp(Broker, Exchange(app), app, configure, eventAssemblies);
+            adapterApps.Add(instance);
+            return instance;
+        }
+
+        public Task WaitUntilConnected(params AdapterApp[] which)
+        {
+            return WaitUntil(() => which.All(a => a.IsConnected));
         }
 
         /// <summary>Deletes durable (shared) queues when the topology is disposed.</summary>
@@ -169,6 +186,11 @@ namespace Common.RabbitMQ.Tests.LegacyModel
             }
 
             foreach (CoreApp app in coreApps)
+            {
+                app.Dispose();
+            }
+
+            foreach (AdapterApp app in adapterApps)
             {
                 app.Dispose();
             }
