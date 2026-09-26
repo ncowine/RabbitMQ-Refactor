@@ -8,8 +8,8 @@ namespace Messaging.Hosting
     public static class MessagingServiceCollectionExtensions
     {
         /// <summary>
-        /// Adds messaging: one keyed <see cref="RabbitMQBus"/> per bus, <see cref="IMessagePublisher"/>, scoped async
-        /// handlers, and a hosted service that starts and stops the buses. Telemetry is added with
+        /// Adds messaging: one keyed <see cref="RabbitMQBus"/> per bus, <see cref="IMessagePublisher"/>,
+        /// <see cref="IMessageSubscriber"/>, scoped async handlers, and a hosted service that starts and stops the buses. Telemetry is added with
         /// <see cref="MessagingBuilder.AddTelemetry"/>.
         /// </summary>
         public static IServiceCollection AddMessaging(this IServiceCollection services, Action<MessagingBuilder> configure)
@@ -28,6 +28,9 @@ namespace Messaging.Hosting
             services.AddSingleton(registry);
             services.AddSingleton<TelemetryObserver>();
             services.AddSingleton<IMessagePublisher, MessagePublisher>();
+            services.AddSingleton<MessageSubscriber>();
+            services.AddSingleton<IMessageSubscriber>(provider => provider.GetRequiredService<MessageSubscriber>());
+            services.AddSingleton<IMessageSink>(provider => provider.GetRequiredService<MessageSubscriber>());
             services.AddHostedService<MessagingHostedService>();
 
             configure(new MessagingBuilder(services, registry));

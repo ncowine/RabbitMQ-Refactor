@@ -46,6 +46,7 @@ code confidently.** If you're in a hurry, read [the 5-minute version](#the-5-min
   that translates between how an app thinks and the engine:
   - **Old WPF apps** use Prism events: `eventAggregator.GetEvent<OrderSaved>().PublishRemote(order)`.
   - **New WPF apps** use plain classes, still through Prism: `GetEvent<MessageEvent<OrderSaved>>().PublishRemote(order)`.
+    Or they use **no Prism at all**: `IMessagePublisher.PublishAsync(order)` and `IMessageSubscriber.Subscribe<OrderSaved>(...)`.
   - **The server** uses handlers: `IMessagePublisher.PublishAsync(order)` and `IMessageHandler<OrderSaved>`.
 - **Sending is fire-and-forget.** A message is put in a buffer instantly and delivered in the background, even if
   RabbitMQ is briefly down.
@@ -128,14 +129,15 @@ Two ideas explain almost everything:
 |---|---|---|---|---|
 | `Messaging/Messaging.Abstractions` | net472, netstandard2.0, net8.0 | nothing | Interfaces and small types: `IMessagePublisher`, `IMessageHandler<T>`, `[Message]`, `MessageContext`, `IMessageSerializer`, `IMessagingObserver`. | Everything below. |
 | `Messaging/Messaging.RabbitMQ` | net472, netstandard2.0, net8.0 | RabbitMQ.Client 7.1.2 | **The engine**: `RabbitMQBus` and its options. | All front doors. |
-| `Messaging/Messaging.Hosting` | net8.0 | Microsoft.Extensions 8.0 | Server-style setup: `AddMessaging`, routes, handlers, System.Text.Json, telemetry, health checks, `MessagingClient`. | The API, modern WPF apps. |
+| `Messaging/Messaging.Hosting` | net8.0 | Microsoft.Extensions 8.0 | Server-style setup: `AddMessaging`, routes, handlers, `IMessageSubscriber`, System.Text.Json, telemetry, health checks, `MessagingClient`. | The API, modern WPF apps. |
 | `Messaging/Messaging.Prism` | net8.0 | Prism.Core, Messaging.Hosting | Optional bridge: plain message classes as Prism events (`MessageEvent<T>`). | Modern WPF apps that like the Prism style. |
 | `Contracts/Employees.Contracts` | netstandard2.0 | Messaging.Abstractions | Plain message classes with legacy-compatible wire names. | The API, modern apps. |
 | `Common.RabbitMQ` | net472, net8.0 | Prism.Core, Newtonsoft 12.0.3, the engine | **Legacy adapter.** Keeps the old API (`PublishRemote`, `RabbitMQService`, `IRabbitMQService`) working on top of the engine. Its public API is frozen: additions only. | Legacy WPF apps, the net8 app's Legacy bus. |
 | `Common.RabbitMQ.Configuration` | net472, net8.0 | System.Configuration | The `<rabbitMQ>` App.config section. | Legacy and net8 WPF apps. |
 | `Common.Events` | net472, net8.0 | Common.RabbitMQ | The demo apps' Prism events (`EmployeeUpdated` and others). | Demo WPF apps. |
 | `WpfApp.Net472` | net472 | the above | Demo legacy desktop app. | You, to try things. |
-| `WpfApp.Net8` | net8.0-windows | the above | Demo modern desktop app. It uses **both** styles side by side: Prism events on its Legacy bus, plain classes on its Modern bus. | You, and as the reference for migrating apps. |
+| `WpfApp.Net8` | net8.0-windows | the above | Demo modern desktop app. It uses **both** styles side by side: Prism events on its Legacy bus, plain classes on its Modern bus. | You, and as the reference for migrating apps that keep Prism. |
+| `WpfApp.Modern` | net8.0-windows | Hosting, Contracts, CommunityToolkit.Mvvm | Demo desktop app with **no Prism**: .NET Generic Host, `appsettings.json`, plain classes on both buses. | You, and as the reference for Prism-free apps. |
 | `WebApi` | net10.0 | Hosting, Contracts | Demo server. No Prism, no Newtonsoft. | You, and as the reference server. |
 
 ### Tests (`tests/`)
@@ -145,7 +147,7 @@ Two ideas explain almost everything:
 | `Common.RabbitMQ.Tests/Golden` | Message bodies are **byte-for-byte** what legacy apps expect (golden JSON files). |
 | `Common.RabbitMQ.Tests/PublicApi` | The legacy adapter's public API has **nothing removed or changed**, only approved additions. |
 | `Common.RabbitMQ.Tests/Broker` | The engine against a real broker: delivery, echo drop, headers, queues, retries, dead letters, observers. |
-| `Common.RabbitMQ.Tests/Hosting` | The server side and modern clients: handlers, JSON, telemetry, health, routing keys, the Prism bridge. |
+| `Common.RabbitMQ.Tests/Hosting` | The server side and modern clients: handlers, JSON, telemetry, health, routing keys, the Prism bridge, `IMessageSubscriber`. |
 | `Common.RabbitMQ.Tests/LegacyModel` | A **model of the real legacy library** and every assumption about it, plus the new code working with it. |
 | `Common.RabbitMQ.Tests/Adapter` | The legacy adapter's newer features: events by assembly, App.config, routing rules. |
 | `Fixtures/Common.RabbitMQ.Baseline` | A **frozen copy** of the original library, so tests can prove old and new builds talk to each other. |
@@ -209,7 +211,8 @@ fix that; it's an optional future step (see [known limits](#design-decisions-and
 6. It hands the object to the **dispatcher**, the one step that differs per front door:
    - **Legacy:** `eventAggregator.GetEvent<TheEvent>().Publish(payload)`, so your normal Prism subscribers run.
    - **Server and modern apps:** each registered handler runs in its **own dependency-injection scope**, then every
-     sink runs. The Prism bridge is a sink that raises `MessageEvent<T>`.
+     sink runs. The Prism bridge is a sink that raises `MessageEvent<T>`. `IMessageSubscriber` is a sink that calls
+     the subscriptions for that message type.
 7. It **settles** the message: acknowledges it on success. On failure, see [When things go wrong](#when-things-go-wrong-retries-dead-letters-and-reconnecting).
 
 ---
@@ -381,7 +384,64 @@ eventAggregator.GetEvent<MessageEvent<EmployeeSaved>>().PublishRemote(saved);
 
 `PublishRemote` finds the publisher through Prism's container, just like the legacy version.
 
-### C. A server (ASP.NET, handlers)
+### C. A modern WPF app without Prism (.NET 8)
+
+Use the same plain message classes as recipe B, but no Prism, no event aggregator and no DryIoc. See
+`src/WpfApp.Modern`.
+
+**1. Start the .NET Generic Host in `App.xaml.cs`.** It gives you DI, `appsettings.json` and logging, and starts
+messaging:
+
+```csharp
+protected override async void OnStartup(StartupEventArgs e)
+{
+    base.OnStartup(e);
+    HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+    {
+        Args = e.Args,
+        ContentRootPath = AppContext.BaseDirectory,       // find appsettings.json next to the exe
+    });
+
+    builder.Services.AddMessaging(messaging => messaging
+        .AddBus("Modern", builder.Configuration.GetSection("Messaging:Buses:Modern"))
+        .AddMessages(typeof(EmployeeSaved).Assembly)      // receive every [Message] class in it
+        .Route<EmployeeSaved>().To("Modern"));
+    builder.Services.AddSingleton<MainWindowViewModel>();
+    builder.Services.AddSingleton<MainWindow>();
+
+    host = builder.Build();
+    MainWindow window = host.Services.GetRequiredService<MainWindow>();   // subscribe first...
+    await host.StartAsync();                                               // ...then connect
+    window.Show();
+}
+```
+
+Stop it in `OnExit` with `Task.Run(() => host.StopAsync()).GetAwaiter().GetResult()`, so the UI thread can't deadlock.
+
+**2. Send and receive in the view model:**
+
+```csharp
+public MainWindowViewModel(IMessagePublisher publisher, IMessageSubscriber subscriber)
+{
+    // Runs on the UI thread, like Prism's ThreadOption.UIThread.
+    subscription = subscriber.Subscribe<EmployeeSaved>(OnSaved, SynchronizationContext.Current);
+}
+
+await publisher.PublishAsync(new EmployeeSaved { Id = 7, Name = "Ada" });
+```
+
+**Things to know about `IMessageSubscriber`:**
+
+- A message type must be **received** for its subscribers to be called: add it with `AddMessages(assembly)` or a handler.
+- `Subscribe` returns an `IDisposable`. **Dispose it to unsubscribe.** Subscriptions are strong references (Prism's
+  are weak), so a window or view model that goes away before the app ends must dispose its subscriptions.
+- **With a synchronization context** (the UI thread's), the call is posted to it and runs later. Its exceptions go to
+  the dispatcher (`Application.DispatcherUnhandledException`), not to the message, so they don't cause retries.
+- **Without one**, or with the async overload `Subscribe<T>((message, context, token) => ...)`, it runs on the
+  receiving thread, and an exception fails the message (retried and dead-lettered on shared queues).
+- Subscribers run after the handlers, in the order they subscribed, and only for the exact message type.
+
+### D. A server (ASP.NET, handlers)
 
 **1. Handlers are ordinary classes:**
 
@@ -431,13 +491,14 @@ using (CorrelationContext.Begin(requestId)) { ... }                             
 Configuration mistakes stop the app at startup with a clear list of what's wrong, for example a route to a bus that
 doesn't exist or a class without `[Message]`.
 
-### D. Choosing between them
+### E. Choosing between them
 
 | You have | Use |
 |---|---|
 | An existing .NET Framework WPF app | Recipe A. Change one registration line and App.config, nothing else. |
-| A new or migrated .NET 8 WPF app | Recipe B. Plain classes, but the familiar Prism style. |
-| A server, or code that should be free of Prism | Recipe C. |
+| A migrated .NET 8 WPF app that keeps Prism | Recipe B. Plain classes, but the familiar Prism style. |
+| A new .NET 8 WPF app, or one dropping Prism | Recipe C, like `WpfApp.Modern`. |
+| A server, or code that should be free of Prism | Recipe D. |
 | A .NET 8 app that must still talk to legacy apps | Both A and B side by side, like `WpfApp.Net8`. |
 
 ---
@@ -558,6 +619,7 @@ dotnet build RabbitMQ.Refactor.sln
 dotnet run --project src/WebApi --urls http://localhost:5199      # then open /health and /api/employees
 src\WpfApp.Net472\bin\Debug\net472\WpfApp.Net472.exe               # start two of these
 src\WpfApp.Net8\bin\Debug\net8.0-windows\WpfApp.Net8.exe
+src\WpfApp.Modern\bin\Debug\net8.0-windows\WpfApp.Modern.exe      # the app without Prism
 ```
 
 **Things to try:**
@@ -565,6 +627,8 @@ src\WpfApp.Net8\bin\Debug\net8.0-windows\WpfApp.Net8.exe
 - **In a net472 window:** click *PublishRemote EmployeeUpdated (Legacy)*. The other windows and the API receive it.
 - **In the net8 window:** click *PublishRemote EmployeeSaved (Modern)*. The API updates its cache and replies with
   `EmployeeCacheRefreshed`, which appears in the net8 window.
+- **In the WpfApp.Modern window:** it has buttons for both buses and shows everything it receives. The net472 windows
+  receive its `EmployeeUpdated` as their Prism event, although it uses no Prism at all.
 - **From the API:** `curl -X POST http://localhost:5199/api/employees/7/legacy-update -H "Content-Type: application/json" -d "{\"name\":\"Ada\"}"`
 - **Reconnecting:** in the management UI, close a connection and watch the app reconnect on its own.
 
@@ -617,7 +681,8 @@ The full reasoning is in the two ADRs. The short version:
 - **Each third-party dependency lives in exactly one layer.** Prism and Newtonsoft are only in the legacy adapter and
   the optional Prism bridge. RabbitMQ.Client is only in the engine. Contracts depend on nothing.
 - **Versions are shared with the legacy apps:** RabbitMQ.Client 7.1.2, Prism.Core 8.1.97, Newtonsoft.Json 12.0.3,
-  pinned in `Directory.Packages.props`. `WpfApp.Net472` opts out of central package versions, as legacy apps do.
+  pinned in `Directory.Packages.props`. The Prism-free demo app adds CommunityToolkit.Mvvm 8.4.2 and
+  Microsoft.Extensions.Hosting 8.0.1. `WpfApp.Net472` opts out of central package versions, as legacy apps do.
 - **Every library that legacy apps load also targets net472**, so they never need extra "netstandard" files.
 
 **Known limits:**
