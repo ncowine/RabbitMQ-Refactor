@@ -131,6 +131,7 @@ No longer frozen, but **configured to match the real system**:
 ### 8. Test baseline
 
 - **The frozen baseline must be the real legacy library.** Its source is preferred; failing that, the replica rebuilt to reproduce the real library's observable behaviour, including its exchange declaration, routing keys and bindings. Until then, "compatible" only means compatible with the replica.
+- **Step 5 as built (2026-09-26).** The real library isn't reachable from this repository, so the baseline is a **model** (`tests/Fixtures/LegacyModel`). It is built from the confirmed facts, with every other behaviour a named, tested assumption listed in [`docs/legacy-baseline-assumptions.md`](../legacy-baseline-assumptions.md). Checking those assumptions against the real library turns the model into the real baseline, one assumption at a time. The replica baseline (`tests/Fixtures/Common.RabbitMQ.Baseline`) stays until steps 6–7, because the current build is still compared against it.
 - **The broker test matrix grows** to cover:
   - each exchange type;
   - custom routing keys received by the old build;

@@ -28,6 +28,14 @@
     <ProjectReference Include="..\Fixtures\Compat.Events.Baseline\Compat.Events.Baseline.csproj" Aliases="baseline" />
   </ItemGroup>
 
+  <!-- Model of the real legacy library and its event assemblies (ADR 0002, step 5). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Fixtures\LegacyModel\Legacy.RabbitMQ\Legacy.RabbitMQ.csproj" />
+    <ProjectReference Include="..\Fixtures\LegacyModel\AppA.Events\AppA.Events.csproj" />
+    <ProjectReference Include="..\Fixtures\LegacyModel\AppB.Events\AppB.Events.csproj" />
+    <ProjectReference Include="..\Fixtures\LegacyModel\Shared.Events\Shared.Events.csproj" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="Golden\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
