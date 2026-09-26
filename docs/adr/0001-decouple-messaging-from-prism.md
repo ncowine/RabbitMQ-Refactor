@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-26
+- **Amended:** 2026-09-26. Legacy projects stay at their current paths, and every library that legacy apps load targets net472 explicitly (sections 1 and 7).
 
 ## Context
 
@@ -39,20 +40,22 @@
 
 ```
 src/Messaging/                     the product, with no legacy concepts
-  Messaging.Abstractions           netstandard2.0, 0 dependencies
-  Messaging.RabbitMQ               netstandard2.0;net8.0, depends on RabbitMQ.Client only
+  Messaging.Abstractions           net472;netstandard2.0;net8.0, 0 dependencies
+  Messaging.RabbitMQ               net472;netstandard2.0;net8.0, depends on RabbitMQ.Client only
   Messaging.Hosting                net8.0+
 
 src/Contracts/
-  <Module>.Contracts               netstandard2.0, 0 dependencies
+  <Module>.Contracts               netstandard2.0, 0 dependencies (adds net472 if a legacy app ever loads it)
 
-src/Legacy/                        anti-corruption layer that can be deleted one day
+src/ (paths unchanged)             anti-corruption layer that can be deleted one day ("Legacy" solution folder)
   Common.RabbitMQ                  Prism adapter, public API unchanged
   Common.RabbitMQ.Configuration    App.config section, unchanged
   Common.Events                    Prism events, unchanged
 ```
 
-**Test for the design:** when legacy is retired, deleting `src/Legacy` requires no change in `src/Messaging`. The core has no `#if NET472`, no Prism concepts and no Newtonsoft.
+The legacy projects keep their paths. Legacy apps reference them by relative `ProjectReference` path, so moving them would mean editing every legacy csproj. They are grouped in a "Legacy" solution folder instead.
+
+**Test for the design:** when legacy is retired, deleting the legacy projects requires no change in `src/Messaging`. The core has no `#if NET472`, no Prism concepts and no Newtonsoft.
 
 #### Messaging.Abstractions
 
@@ -127,6 +130,7 @@ src/Legacy/                        anti-corruption layer that can be deleted one
 - The legacy adapter compiles against the lowest version any legacy app uses, so apps can bind up but are never forced up.
 - Newtonsoft.Json 12.0.3 carries advisory GHSA-5crp-9r3c-p9vr (deeply nested JSON can cause a stack overflow, fixed in 13.0.1). It's accepted as a legacy constraint. The server doesn't use Newtonsoft (see section 4). Apps that can move to 13.x may bind up.
 - `AssemblyVersion` stays fixed per major version (for example `1.0.0.0`). The build number goes in `FileVersion` and `InformationalVersion`.
+- **Every library that legacy apps load targets `net472` explicitly**, alongside `netstandard2.0` and `net8.0`. When a non-SDK net472 app consumes a `netstandard2.0`-only library, it can need the `netstandard.dll` facade files and extra binding redirects. An explicit `net472` build avoids both.
 - The net472 build of the core and the adapter adds **no new packages** beyond those the legacy apps already carry. RabbitMQ.Client 7.1.2 already brings DiagnosticSource, System.Memory, Unsafe, Channels, Pipelines, RateLimiting and Bcl.AsyncInterfaces on net472, so there are no new binding redirects.
 
 ## Delivery plan
@@ -134,7 +138,7 @@ src/Legacy/                        anti-corruption layer that can be deleted one
 Each step can be released on its own:
 
 0. **Safety net.** Align the repo with the legacy versions (Newtonsoft 12.0.3). Add golden tests for the wire format (headers, routing key, body bytes), plus a compatibility matrix against a real broker: current build ↔ new build, in both directions. The current build is kept as a test fixture. Broker tests skip when no broker is reachable, unless `RABBITMQ_TESTS_REQUIRED=1` is set (for CI).
-1. **Extract the core** behind the unchanged `Common.RabbitMQ` façade, with **no behaviour change**. Ship this to the WPF apps first.
+1. **Extract the core** behind the unchanged `Common.RabbitMQ` façade, with **no behaviour change**. A public API test pins the façade's public surface to the baseline's. Before shipping, check on one real non-SDK legacy app that the new assemblies (`Messaging.Abstractions`, `Messaging.RabbitMQ`) are copied to its output through its project reference to `Common.RabbitMQ`. Ship this to the WPF apps first.
 2. **Add the additive headers and observer hook** to the core. The no-op stays the default.
 3. **Add `Messaging.Hosting`** and move the API off Prism and `Common.Events`, onto plain-class contracts and routing to both buses.
 4. **Optional:** add `SubscribeOnly` to the legacy config, mark `PublishRemote` obsolete once server publishing is complete, and add an outbox extension if needed.
@@ -147,7 +151,7 @@ Each step can be released on its own:
 - Contracts can't cause assembly mismatches, because they have no dependencies.
 - The server gets async handlers, DI scopes, retry and dead-lettering, and OpenTelemetry. Legacy pays none of those costs.
 - Legacy apps redeploy with no code change.
-- Legacy code has a clear exit: delete `src/Legacy`.
+- Legacy code has a clear exit: delete the legacy projects.
 
 ### Negative and risks
 
@@ -155,6 +159,7 @@ Each step can be released on its own:
 - Messages reaching legacy clients are tied to a legacy `FullName` wire name that can never change.
 - System.Text.Json ↔ Newtonsoft parity relies on golden tests. Edge cases (dates, decimals, nulls) need coverage.
 - Non-SDK apps still have to install RabbitMQ.Client's packages themselves (unchanged from today).
+- Non-SDK apps now get two more assemblies (`Messaging.Abstractions`, `Messaging.RabbitMQ`) indirectly, through their reference to `Common.RabbitMQ`. MSBuild usually copies such indirect references, but this has to be checked on a real legacy app.
 - Adding a public constructor overload to `RabbitMQService` would break DryIoc resolution at runtime, because DryIoc rejects multiple constructors by default. New options must come in through properties or configuration.
 
 ## Alternatives considered
