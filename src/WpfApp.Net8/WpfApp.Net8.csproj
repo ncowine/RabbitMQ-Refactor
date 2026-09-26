@@ -14,6 +14,8 @@
     <ProjectReference Include="..\Common.Events\Common.Events.csproj" />
     <ProjectReference Include="..\Common.RabbitMQ.Configuration\Common.RabbitMQ.Configuration.csproj" />
     <ProjectReference Include="..\Common.RabbitMQ\Common.RabbitMQ.csproj" />
+    <ProjectReference Include="..\Contracts\Employees.Contracts\Employees.Contracts.csproj" />
+    <ProjectReference Include="..\Messaging\Messaging.Prism\Messaging.Prism.csproj" />
   </ItemGroup>
 
 </Project>

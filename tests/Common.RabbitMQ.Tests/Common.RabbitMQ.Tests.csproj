@@ -47,6 +47,7 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
     <ProjectReference Include="..\..\src\Messaging\Messaging.Hosting\Messaging.Hosting.csproj" />
+    <ProjectReference Include="..\..\src\Messaging\Messaging.Prism\Messaging.Prism.csproj" />
     <ProjectReference Include="..\..\src\Contracts\Employees.Contracts\Employees.Contracts.csproj" />
   </ItemGroup>
 

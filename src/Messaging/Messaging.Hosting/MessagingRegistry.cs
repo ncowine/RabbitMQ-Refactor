@@ -6,16 +6,22 @@ using Messaging.RabbitMQ;
 namespace Messaging.Hosting
 {
     /// <summary>
-    /// What <see cref="MessagingBuilder"/> configured: the buses, where each message type is published (routes) and
-    /// which handlers receive from which buses. Routing belongs to the host, not the contract (ADR 0001, section 1).
+    /// What <see cref="MessagingBuilder"/> configured: the buses, where and with which routing key each message type is
+    /// published (routes), which message types are received and by which handlers, and subscriptions added in code.
+    /// Routing belongs to the host, not the contract (ADR 0001, section 1; ADR 0002, section 5).
     /// </summary>
     internal sealed class MessagingRegistry
     {
         private readonly Dictionary<string, BusRegistration> buses = new Dictionary<string, BusRegistration>(StringComparer.Ordinal);
-        private readonly Dictionary<Type, string[]> routes = new Dictionary<Type, string[]>();
+        private readonly Dictionary<Type, RouteRegistration> routes = new Dictionary<Type, RouteRegistration>();
         private readonly List<HandlerRegistration> handlers = new List<HandlerRegistration>();
+        private readonly List<MessageTypeRegistration> messageTypes = new List<MessageTypeRegistration>();
+        private readonly List<PendingSubscription> subscriptions = new List<PendingSubscription>();
 
         public IReadOnlyCollection<BusRegistration> Buses => buses.Values;
+
+        /// <summary>Set by <see cref="MessagingBuilder.AddTelemetry"/>.</summary>
+        public bool TelemetryEnabled { get; set; }
 
         public void AddBus(BusRegistration bus)
         {
@@ -32,16 +38,28 @@ namespace Messaging.Hosting
             return buses[name];
         }
 
-        public void AddRoute(Type messageType, string[] busNames)
+        /// <summary>The route for <paramref name="messageType"/>, created on first use.</summary>
+        public RouteRegistration Route(Type messageType)
         {
-            string[] existing = routes.TryGetValue(messageType, out string[] current) ? current : Array.Empty<string>();
-            routes[messageType] = existing.Concat(busNames).Distinct(StringComparer.Ordinal).ToArray();
+            if (!routes.TryGetValue(messageType, out RouteRegistration route))
+            {
+                route = new RouteRegistration(messageType);
+                routes.Add(messageType, route);
+            }
+
+            return route;
         }
 
-        /// <returns>The buses <paramref name="messageType"/> is published to, or null when it has no route.</returns>
-        public IReadOnlyList<string> GetRoute(Type messageType)
+        /// <returns>The route of <paramref name="messageType"/>, or null when it has none.</returns>
+        public RouteRegistration GetRoute(Type messageType)
         {
-            return routes.TryGetValue(messageType, out string[] busNames) ? busNames : null;
+            return routes.TryGetValue(messageType, out RouteRegistration route) ? route : null;
+        }
+
+        /// <summary>The buses a route publishes to: its own list, or the only bus when the list is empty.</summary>
+        public IReadOnlyList<string> GetRouteBuses(RouteRegistration route)
+        {
+            return route.Buses.Count > 0 ? route.Buses : buses.Keys.ToList();
         }
 
         public void AddHandler(HandlerRegistration handler)
@@ -49,17 +67,42 @@ namespace Messaging.Hosting
             handlers.Add(handler);
         }
 
+        public void AddMessageType(MessageTypeRegistration messageType)
+        {
+            messageTypes.Add(messageType);
+        }
+
+        public void AddSubscription(PendingSubscription subscription)
+        {
+            subscriptions.Add(subscription);
+        }
+
+        public IEnumerable<SubscriptionOptions> GetSubscriptions(string busName)
+        {
+            return subscriptions
+                .Where(s => s.BusName == null || string.Equals(s.BusName, busName, StringComparison.Ordinal))
+                .Select(s => s.Subscription);
+        }
+
         public IEnumerable<HandlerRegistration> GetHandlers(Type messageType, string busName)
         {
             return handlers.Where(h => h.MessageType == messageType && h.Buses.Contains(busName, StringComparer.Ordinal));
         }
 
-        /// <summary>The wire names a bus binds: every message type with a handler on that bus.</summary>
-        public IEnumerable<MessageRegistration> GetSubscriptions(string busName)
+        /// <summary>
+        /// The message types a bus receives: every type with a handler on that bus, plus every type added with
+        /// <see cref="MessagingBuilder.AddMessages"/> for that bus.
+        /// </summary>
+        public IEnumerable<MessageRegistration> GetMessageRegistrations(string busName)
         {
-            return handlers
+            IEnumerable<Type> handled = handlers
                 .Where(h => h.Buses.Contains(busName, StringComparer.Ordinal))
-                .Select(h => h.MessageType)
+                .Select(h => h.MessageType);
+            IEnumerable<Type> added = messageTypes
+                .Where(m => m.Buses.Count == 0 || m.Buses.Contains(busName, StringComparer.Ordinal))
+                .Select(m => m.MessageType);
+
+            return handled.Concat(added)
                 .Distinct()
                 .Select(t => new MessageRegistration(WireNames.Get(t), t));
         }
@@ -69,10 +112,15 @@ namespace Messaging.Hosting
         {
             List<string> errors = new List<string>();
 
-            foreach (KeyValuePair<Type, string[]> route in routes)
+            foreach (RouteRegistration route in routes.Values)
             {
-                errors.AddRange(UnknownBuses(route.Value).Select(b => $"{route.Key.Name} is routed to unknown bus '{b}'."));
-                errors.AddRange(MissingWireName(route.Key));
+                if (route.Buses.Count == 0 && buses.Count != 1)
+                {
+                    errors.Add($"{route.MessageType.Name} has no bus and this application has {buses.Count}. Use Route<{route.MessageType.Name}>().To(...).");
+                }
+
+                errors.AddRange(UnknownBuses(route.Buses).Select(b => $"{route.MessageType.Name} is routed to unknown bus '{b}'."));
+                errors.AddRange(MissingWireName(route.MessageType));
             }
 
             foreach (HandlerRegistration handler in handlers)
@@ -81,10 +129,26 @@ namespace Messaging.Hosting
                 errors.AddRange(MissingWireName(handler.MessageType));
             }
 
+            foreach (MessageTypeRegistration messageType in messageTypes)
+            {
+                errors.AddRange(UnknownBuses(messageType.Buses).Select(b => $"{messageType.MessageType.Name} is received on unknown bus '{b}'."));
+            }
+
+            foreach (PendingSubscription subscription in subscriptions)
+            {
+                if (subscription.BusName == null && buses.Count != 1)
+                {
+                    errors.Add($"The subscription to '{subscription.Subscription.Exchange}' has no bus and this application has {buses.Count}. Pass the bus name.");
+                }
+
+                errors.AddRange(UnknownBuses(subscription.BusName == null ? new string[0] : new[] { subscription.BusName })
+                    .Select(b => $"The subscription to '{subscription.Subscription.Exchange}' is for unknown bus '{b}'."));
+            }
+
             foreach (BusRegistration bus in buses.Values)
             {
                 // Two types with one wire name on the same bus would make incoming messages ambiguous.
-                IEnumerable<string> duplicates = GetSubscriptions(bus.Name)
+                IEnumerable<string> duplicates = GetMessageRegistrations(bus.Name)
                     .GroupBy(r => r.WireName)
                     .Where(g => g.Count() > 1)
                     .Select(g => $"Bus '{bus.Name}' has several message types named '{g.Key}': {string.Join(", ", g.Select(r => r.MessageType.Name))}.");

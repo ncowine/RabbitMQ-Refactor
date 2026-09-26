@@ -35,7 +35,7 @@ namespace Messaging.Hosting
             {
                 RabbitMQBus bus = provider.GetRequiredKeyedService<RabbitMQBus>(registration.Name);
                 bus.Log += OnBusLog;
-                bus.Start(registry.GetSubscriptions(registration.Name));
+                bus.Start(registry.GetMessageRegistrations(registration.Name));
                 started.Add(bus);
             }
 

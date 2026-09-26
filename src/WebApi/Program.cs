@@ -16,7 +16,8 @@ builder.Services.AddMessaging(messaging => messaging
     .Route<EmployeeUpdated>().To("Legacy")
     .Route<EmployeeCacheRefreshed>().To("Modern")
     .Handle<EmployeeUpdated, EmployeeUpdatedHandler>().From("Legacy")
-    .Handle<EmployeeSaved, EmployeeSavedHandler>().From("Modern"));
+    .Handle<EmployeeSaved, EmployeeSavedHandler>().From("Modern")
+    .AddTelemetry());
 
 builder.Services.AddHealthChecks().AddMessaging();
 
