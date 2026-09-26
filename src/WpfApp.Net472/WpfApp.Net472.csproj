@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Prism.DryIoc" Version="8.1.97" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Common.Events\Common.Events.csproj" />
+    <ProjectReference Include="..\Common.RabbitMQ.Configuration\Common.RabbitMQ.Configuration.csproj" />
+    <ProjectReference Include="..\Common.RabbitMQ\Common.RabbitMQ.csproj" />
+  </ItemGroup>
+
+</Project>
