@@ -53,6 +53,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AppB.Events", "tests\Fixtur
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Shared.Events", "tests\Fixtures\LegacyModel\Shared.Events\Shared.Events.csproj", "{5CAF561B-4224-4059-A249-0CCFAA5E30D8}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Messaging.Prism", "src\Messaging\Messaging.Prism\Messaging.Prism.csproj", "{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -279,6 +281,18 @@ Global
 		{5CAF561B-4224-4059-A249-0CCFAA5E30D8}.Release|x64.Build.0 = Release|Any CPU
 		{5CAF561B-4224-4059-A249-0CCFAA5E30D8}.Release|x86.ActiveCfg = Release|Any CPU
 		{5CAF561B-4224-4059-A249-0CCFAA5E30D8}.Release|x86.Build.0 = Release|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Debug|x64.Build.0 = Debug|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Debug|x86.Build.0 = Debug|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Release|x64.ActiveCfg = Release|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Release|x64.Build.0 = Release|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Release|x86.ActiveCfg = Release|Any CPU
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -307,5 +321,6 @@ Global
 		{6D956CE8-D35B-467D-A26F-939B483A7481} = {2B73962F-4F0B-9A8B-5B31-6764871A2AF0}
 		{B392A826-D655-43FB-844F-97A4992D7089} = {2B73962F-4F0B-9A8B-5B31-6764871A2AF0}
 		{5CAF561B-4224-4059-A249-0CCFAA5E30D8} = {2B73962F-4F0B-9A8B-5B31-6764871A2AF0}
+		{E8095DC1-7D78-4DC2-ADA4-6C9A478B8DAA} = {1AB6002E-85EB-C75A-9828-95B8B8565E80}
 	EndGlobalSection
 EndGlobal

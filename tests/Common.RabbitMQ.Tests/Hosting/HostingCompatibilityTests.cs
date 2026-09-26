@@ -30,7 +30,7 @@ namespace Common.RabbitMQ.Tests.Hosting
                 ICompatEndpoint current = bus.AddEndpoint(CompatBuild.Current, "compat-current");
                 ICompatEndpoint baseline = bus.AddEndpoint(CompatBuild.Baseline, "compat-baseline");
 
-                await using (TestHost host = await TestHost.Start(bus, "compat-server", messaging => messaging.Route<CompatMessage>().To(CompatBus.Name)))
+                await using (TestHost host = await TestHost.Start(bus, "compat-server", messaging => messaging.Route<CompatMessage>().To(CompatBus.Name).AddTelemetry()))
                 {
                     await bus.WaitUntilConnected();
                     await host.WaitUntilConnected();
@@ -103,7 +103,7 @@ namespace Common.RabbitMQ.Tests.Hosting
 
                 await using (TestHost host = await TestHost.Start(bus, "compat-server", messaging => messaging
                     .Route<CompatMessage>().To(CompatBus.Name)
-                    .Handle<CompatMessage, CompatMessageHandler>().From(CompatBus.Name)))
+                    .Handle<CompatMessage, CompatMessageHandler>().From(CompatBus.Name).AddTelemetry()))
                 {
                     await bus.WaitUntilConnected();
                     await host.WaitUntilConnected();
@@ -144,8 +144,8 @@ namespace Common.RabbitMQ.Tests.Hosting
                 ActivitySource.AddActivityListener(listener);
 
                 await using (TestBus bus = await TestBus.Create())
-                await using (TestHost sender = await TestHost.Start(bus, "compat-sender", messaging => messaging.Route<CompatMessage>().To(CompatBus.Name)))
-                await using (TestHost receiver = await TestHost.Start(bus, "compat-receiver", messaging => messaging.Handle<CompatMessage, CompatMessageHandler>().From(CompatBus.Name)))
+                await using (TestHost sender = await TestHost.Start(bus, "compat-sender", messaging => messaging.Route<CompatMessage>().To(CompatBus.Name).AddTelemetry()))
+                await using (TestHost receiver = await TestHost.Start(bus, "compat-receiver", messaging => messaging.Handle<CompatMessage, CompatMessageHandler>().From(CompatBus.Name).AddTelemetry()))
                 {
                     await sender.WaitUntilConnected();
                     await receiver.WaitUntilConnected();

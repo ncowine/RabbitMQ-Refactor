@@ -7,8 +7,8 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Messaging.Hosting
 {
     /// <summary>
-    /// Runs every handler registered for the message on this bus, in a new DI scope per message, inside the message's
-    /// correlation ID. Handlers run one after another; the first exception fails the message.
+    /// Runs every handler registered for the message on this bus, then every <see cref="IMessageSink"/>, in a new DI scope
+    /// per message, inside the message's correlation ID. They run one after another; the first exception fails the message.
     /// </summary>
     internal sealed class ScopedDispatcher : IInboundDispatcher
     {
@@ -35,6 +35,11 @@ namespace Messaging.Hosting
                     {
                         object instance = scope.ServiceProvider.GetRequiredService(handler.HandlerType);
                         await handler.Invoke(instance, message, context, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    foreach (IMessageSink sink in scope.ServiceProvider.GetServices<IMessageSink>())
+                    {
+                        await sink.Deliver(message, context, cancellationToken).ConfigureAwait(false);
                     }
                 }
                 finally

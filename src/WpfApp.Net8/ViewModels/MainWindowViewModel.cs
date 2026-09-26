@@ -4,12 +4,22 @@ using System.Diagnostics;
 using System.Windows;
 using Common.Events;
 using Common.RabbitMQ;
+using Messaging.Hosting;
+using Messaging.Prism;
+using Messaging.RabbitMQ;
+using Microsoft.Extensions.DependencyInjection;
 using Prism.Commands;
 using Prism.Events;
 using Prism.Mvvm;
+using ModernEmployeeCacheRefreshed = Employees.Contracts.EmployeeCacheRefreshed;
+using ModernEmployeeSaved = Employees.Contracts.EmployeeSaved;
 
 namespace WpfApp.Net8.ViewModels
 {
+    /// <summary>
+    /// Uses both messaging styles through the one <see cref="IEventAggregator"/>: Prism events on the Legacy bus, plain
+    /// message classes as <see cref="MessageEvent{TMessage}"/> on the Modern bus.
+    /// </summary>
     public class MainWindowViewModel : BindableBase
     {
         private static readonly string applicationName = $"WpfApp.Net8 #{Process.GetCurrentProcess().Id}";
@@ -19,7 +29,7 @@ namespace WpfApp.Net8.ViewModels
         private string employeeName = "Jane Doe";
         private string department = "Finance";
 
-        public MainWindowViewModel(IEventAggregator eventAggregator, RabbitMQServiceRouter rabbitMQServiceRouter)
+        public MainWindowViewModel(IEventAggregator eventAggregator, RabbitMQServiceRouter rabbitMQServiceRouter, MessagingClient messagingClient)
         {
             this.eventAggregator = eventAggregator;
 
@@ -31,14 +41,15 @@ namespace WpfApp.Net8.ViewModels
             // Local event
             eventAggregator.GetEvent<EmployeeSelected>().Subscribe(OnEmployeeSelected, ThreadOption.UIThread);
 
-            // Legacy bus
+            // Legacy bus: Prism events, the old way.
             eventAggregator.GetEvent<EmployeeUpdated>().Subscribe(OnEmployeeUpdated, ThreadOption.UIThread);
 
-            // Modern bus
-            eventAggregator.GetEvent<EmployeeSaved>().Subscribe(OnEmployeeSaved, ThreadOption.UIThread);
-            eventAggregator.GetEvent<EmployeeCacheRefreshed>().Subscribe(OnEmployeeCacheRefreshed, ThreadOption.UIThread);
+            // Modern bus: plain message classes, same Prism style.
+            eventAggregator.GetEvent<MessageEvent<ModernEmployeeSaved>>().Subscribe(OnEmployeeSaved, ThreadOption.UIThread);
+            eventAggregator.GetEvent<MessageEvent<ModernEmployeeCacheRefreshed>>().Subscribe(OnEmployeeCacheRefreshed, ThreadOption.UIThread);
 
-            rabbitMQServiceRouter.Log += OnRabbitMQLog;
+            rabbitMQServiceRouter.Log += OnMessagingLog;
+            messagingClient.Services.GetRequiredKeyedService<RabbitMQBus>("Modern").Log += OnMessagingLog;
         }
 
         public string Title => applicationName;
@@ -87,7 +98,18 @@ namespace WpfApp.Net8.ViewModels
         {
             try
             {
-                eventAggregator.GetEvent<EmployeeSaved>().PublishRemote(CreateEmployee());
+                Employee employee = CreateEmployee();
+                ModernEmployeeSaved saved = new ModernEmployeeSaved
+                {
+                    Id = employee.Id,
+                    Name = employee.Name,
+                    Department = employee.Department,
+                    UpdatedBy = employee.UpdatedBy,
+                    UpdatedAt = employee.UpdatedAt,
+                };
+
+                // The publisher is resolved from Prism's container, like the legacy PublishRemote.
+                eventAggregator.GetEvent<MessageEvent<ModernEmployeeSaved>>().PublishRemote(saved);
             }
             catch (Exception ex)
             {
@@ -123,20 +145,25 @@ namespace WpfApp.Net8.ViewModels
             AddMessage($"EmployeeUpdated {employee}");
         }
 
-        private void OnEmployeeSaved(Employee employee)
+        private void OnEmployeeSaved(ModernEmployeeSaved saved)
         {
-            AddMessage($"EmployeeSaved {employee}");
+            AddMessage($"EmployeeSaved {Describe(saved.Id, saved.Name, saved.Department, saved.UpdatedBy, saved.UpdatedAt)}");
         }
 
-        private void OnEmployeeCacheRefreshed(Employee employee)
+        private void OnEmployeeCacheRefreshed(ModernEmployeeCacheRefreshed refreshed)
         {
-            AddMessage($"EmployeeCacheRefreshed {employee}");
+            AddMessage($"EmployeeCacheRefreshed {Describe(refreshed.Id, refreshed.Name, refreshed.Department, refreshed.UpdatedBy, refreshed.UpdatedAt)}");
         }
 
-        private void OnRabbitMQLog(object sender, string message)
+        private void OnMessagingLog(object sender, string message)
         {
-            string busName = ((RabbitMQService)sender).BusName;
+            string busName = sender is RabbitMQService service ? service.BusName : ((RabbitMQBus)sender).BusName;
             Application.Current?.Dispatcher.BeginInvoke(new Action(() => AddMessage($"[{busName}] {message}")));
+        }
+
+        private static string Describe(int id, string name, string department, string updatedBy, DateTime updatedAt)
+        {
+            return $"#{id} {name} ({department}) by {updatedBy} at {updatedAt:HH:mm:ss}";
         }
 
         private void AddMessage(string message)

@@ -9,7 +9,8 @@ namespace Messaging.Hosting
     {
         /// <summary>
         /// Adds messaging: one keyed <see cref="RabbitMQBus"/> per bus, <see cref="IMessagePublisher"/>, scoped async
-        /// handlers, the telemetry observer and a hosted service that starts and stops the buses.
+        /// handlers, and a hosted service that starts and stops the buses. Telemetry is added with
+        /// <see cref="MessagingBuilder.AddTelemetry"/>.
         /// </summary>
         public static IServiceCollection AddMessaging(this IServiceCollection services, Action<MessagingBuilder> configure)
         {
@@ -39,11 +40,14 @@ namespace Messaging.Hosting
             RabbitMQBusOptions options = provider.GetRequiredService<IOptionsMonitor<RabbitMQBusOptions>>().Get(name);
             IMessageSerializer serializer = registry.GetBus(name).Serializer ?? new SystemTextJsonMessageSerializer();
 
+            // Subscriptions added in code join those from configuration. Each bus is created once.
+            options.Subscriptions.AddRange(registry.GetSubscriptions(name));
+
             return new RabbitMQBus(
                 options,
                 serializer,
                 new ScopedDispatcher(provider.GetRequiredService<IServiceScopeFactory>(), registry, name),
-                provider.GetRequiredService<TelemetryObserver>());
+                registry.TelemetryEnabled ? provider.GetRequiredService<TelemetryObserver>() : null);
         }
     }
 }
