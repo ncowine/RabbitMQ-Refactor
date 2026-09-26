@@ -32,4 +32,16 @@
     <None Include="Golden\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Messaging.Hosting is the server's (net8.0+); its tests don't exist in the net472 build. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <ProjectReference Include="..\..\src\Messaging\Messaging.Hosting\Messaging.Hosting.csproj" />
+    <ProjectReference Include="..\..\src\Contracts\Employees.Contracts\Employees.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' != 'net8.0'">
+    <Compile Remove="Hosting\**" />
+  </ItemGroup>
+
 </Project>

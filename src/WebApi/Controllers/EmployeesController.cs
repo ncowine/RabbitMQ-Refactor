@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
-using Common.Events;
-using Common.RabbitMQ;
+using System.Threading;
+using System.Threading.Tasks;
+using Messaging;
 using Microsoft.AspNetCore.Mvc;
-using Prism.Events;
+using WebApi.Models;
 using WebApi.Services;
 
 namespace WebApi.Controllers
@@ -14,12 +15,12 @@ namespace WebApi.Controllers
     {
         private const string ApplicationName = "WebApi";
 
-        private readonly IEventAggregator eventAggregator;
+        private readonly IMessagePublisher publisher;
         private readonly EmployeeCache employeeCache;
 
-        public EmployeesController(IEventAggregator eventAggregator, EmployeeCache employeeCache)
+        public EmployeesController(IMessagePublisher publisher, EmployeeCache employeeCache)
         {
-            this.eventAggregator = eventAggregator;
+            this.publisher = publisher;
             this.employeeCache = employeeCache;
         }
 
@@ -38,22 +39,25 @@ namespace WebApi.Controllers
 
         /// <summary>Updates the cache and notifies net8 clients (Modern bus).</summary>
         [HttpPut("{id:int}")]
-        public Employee Put(int id, Employee employee)
+        public async Task<Employee> Put(int id, Employee employee, CancellationToken cancellationToken)
         {
             Stamp(id, employee);
             employeeCache.Upsert(employee);
 
-            eventAggregator.GetEvent<EmployeeCacheRefreshed>().PublishRemote(employee);
+            await publisher.PublishAsync(employee.ToEmployeeCacheRefreshed(), cancellationToken);
             return employee;
         }
 
-        /// <summary>Sends EmployeeUpdated to the 472 apps (Legacy bus).</summary>
+        /// <summary>Updates the cache and sends EmployeeUpdated to the 472 apps (Legacy bus).</summary>
         [HttpPost("{id:int}/legacy-update")]
-        public Employee PublishLegacyUpdate(int id, Employee employee)
+        public async Task<Employee> PublishLegacyUpdate(int id, Employee employee, CancellationToken cancellationToken)
         {
             Stamp(id, employee);
 
-            eventAggregator.GetEvent<EmployeeUpdated>().PublishRemote(employee);
+            // PublishRemote also raised the event locally, which updated the cache through the API's own subscriber.
+            employeeCache.Upsert(employee);
+
+            await publisher.PublishAsync(employee.ToEmployeeUpdated(), cancellationToken);
             return employee;
         }
 

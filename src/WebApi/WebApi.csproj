@@ -1,12 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
+  <!-- No Prism, no Newtonsoft, no Common.Events: plain-class contracts over Messaging.Hosting (ADR 0001, step 3). -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Common.Events\Common.Events.csproj" />
-    <ProjectReference Include="..\Common.RabbitMQ\Common.RabbitMQ.csproj" />
+    <ProjectReference Include="..\Contracts\Employees.Contracts\Employees.Contracts.csproj" />
+    <ProjectReference Include="..\Messaging\Messaging.Hosting\Messaging.Hosting.csproj" />
   </ItemGroup>
 
 </Project>

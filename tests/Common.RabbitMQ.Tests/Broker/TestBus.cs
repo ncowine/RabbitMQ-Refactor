@@ -31,6 +31,8 @@ namespace Common.RabbitMQ.Tests.Broker
 
         public string ExchangeName { get; }
 
+        public BrokerSettings Broker => broker;
+
         /// <summary>Skips the test when there is no broker (see <see cref="BrokerSettings"/>).</summary>
         public static async Task<TestBus> Create()
         {

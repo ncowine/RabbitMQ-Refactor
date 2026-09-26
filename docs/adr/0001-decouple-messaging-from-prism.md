@@ -42,10 +42,10 @@
 src/Messaging/                     the product, with no legacy concepts
   Messaging.Abstractions           net472;netstandard2.0;net8.0, 0 dependencies
   Messaging.RabbitMQ               net472;netstandard2.0;net8.0, depends on RabbitMQ.Client only
-  Messaging.Hosting                net8.0+
+  Messaging.Hosting                net8.0, Microsoft.Extensions 8.0 (a net8 client can opt in without being forced up)
 
 src/Contracts/
-  <Module>.Contracts               netstandard2.0, 0 dependencies (adds net472 if a legacy app ever loads it)
+  <Module>.Contracts               netstandard2.0; references only Messaging.Abstractions (no dependencies) for [Message]
 
 src/ (paths unchanged)             anti-corruption layer that can be deleted one day ("Legacy" solution folder)
   Common.RabbitMQ                  Prism adapter, public API unchanged
@@ -78,6 +78,7 @@ The legacy projects keep their paths. Legacy apps reference them by relative `Pr
 - Routing belongs to the host, not the contract: `Route<EmployeeUpdated>().To("Legacy", "Modern")`.
 - Async handlers, resolved in a **DI scope per message**. Messages are acked after the handler succeeds.
 - A System.Text.Json serializer configured for output compatible with Newtonsoft (see section 4).
+- Until the shared-queue work (delivery plan step 3b), the server uses the same per-instance queues and ack-always behaviour as today. Retry and dead-lettering apply only to the server's shared quorum queues. Client queues never change.
 - An observer built on `ActivitySource`, `Meter` and `ILogger`, following OpenTelemetry messaging semantic conventions. It adds the `traceparent` and `correlation-id` headers. The message ID needs no header: the core already sends one in the AMQP `message-id` property on every message.
 - Health checks.
 
@@ -108,6 +109,7 @@ The legacy projects keep their paths. Legacy apps reference them by relative `Pr
 
 - The server uses System.Text.Json with PascalCase names, case-insensitive reads, ISO 8601 dates and numeric enums.
 - **Golden tests** check both directions: bytes from the server deserialize correctly under Newtonsoft 12.0.3, and the reverse.
+- Measured: with the relaxed JSON encoder, System.Text.Json writes the legacy employee bodies byte for byte. The only difference found is whole decimals and doubles (`12` instead of `12.0`), which both libraries read to the same value. It is pinned in `type-coverage.stj.json`.
 - The serializer is per bus. If a payload can't round-trip, a bus can switch to a Newtonsoft serializer through configuration, with no change to the core.
 
 ### 5. Observability
@@ -142,6 +144,8 @@ Each step can be released on its own:
 1. **Extract the core** behind the unchanged `Common.RabbitMQ` façade, with **no behaviour change**. A public API test pins the façade's public surface to the baseline's. Before shipping, check on one real non-SDK legacy app that the new assemblies (`Messaging.Abstractions`, `Messaging.RabbitMQ`) are copied to its output through its project reference to `Common.RabbitMQ`. Ship this to the WPF apps first.
 2. **Add the additive headers and observer hook** to the core. The no-op stays the default.
 3. **Add `Messaging.Hosting`** and move the API off Prism and `Common.Events`, onto plain-class contracts and routing to both buses.
+   - 3a: hosting, System.Text.Json, observability, health checks and the API migration, on the existing per-instance queues.
+   - 3b: server-side shared quorum queues with retry and a dead-letter exchange and queue (section 6).
 4. **Optional:** add `SubscribeOnly` to the legacy config, mark `PublishRemote` obsolete once server publishing is complete, and add an outbox extension if needed.
 
 ## Consequences
