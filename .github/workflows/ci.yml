@@ -1,0 +1,148 @@
+# Builds everything and runs the full test suite against a real RabbitMQ broker.
+#
+# Two jobs, because GitHub's service containers only run on Linux while WPF and net472 need Windows:
+# - linux:   RabbitMQ in a service container; the net8.0 tests.
+# - windows: the whole solution (WPF, net472, the net10 API) and the tests on BOTH net472 and net8.0, against a broker
+#            installed on the runner. This is the only job that exercises the legacy net472 path on a real broker.
+#
+# RABBITMQ_TESTS_REQUIRED=1 turns "no broker" into a failure instead of skipped tests, so a broken broker setup can
+# never pass silently. Broker and Erlang versions match local development (docs/legacy-baseline-assumptions.md, F4).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  RABBITMQ_TESTS_REQUIRED: "1"
+  RABBITMQ_VERSION: 4.3.6
+  RABBITMQ_SHA256: 48161b084f1257edc112b24fccda378cc3e83c8e4b94984801cd6651817981f1
+  ERLANG_VERSION: 28.5.0.6
+  ERLANG_SHA256: e3537a20f47a34966d1f1b7480b7a15c5cdef4e82a5adfd9c97d7d2ebcac0535
+
+jobs:
+  linux:
+    name: Tests on net8.0 (Linux, broker container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      rabbitmq:
+        image: rabbitmq:4.3.6
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-linux-${{ hashFiles('Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-linux-
+
+      - name: Test (net8.0)
+        run: >-
+          dotnet test tests/Common.RabbitMQ.Tests/Common.RabbitMQ.Tests.csproj
+          --framework net8.0 --configuration Release
+          --logger trx --results-directory TestResults
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-linux
+          path: TestResults
+
+  windows:
+    name: Build all + tests on net472 and net8.0 (Windows, local broker)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-windows-${{ hashFiles('Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-windows-
+
+      - name: Install Erlang and start RabbitMQ
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          function Get-Verified([string] $url, [string] $file, [string] $sha256) {
+            Invoke-WebRequest -Uri $url -OutFile $file
+            $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $sha256) { throw "SHA-256 mismatch for $url`: expected $sha256, got $actual" }
+          }
+
+          $erlang = Join-Path $env:RUNNER_TEMP 'otp.exe'
+          Get-Verified "https://github.com/erlang/otp/releases/download/OTP-$env:ERLANG_VERSION/otp_win64_$env:ERLANG_VERSION.exe" $erlang $env:ERLANG_SHA256
+          Start-Process -FilePath $erlang -ArgumentList '/S' -Wait
+
+          $zip = Join-Path $env:RUNNER_TEMP 'rabbitmq.zip'
+          Get-Verified "https://github.com/rabbitmq/rabbitmq-server/releases/download/v$env:RABBITMQ_VERSION/rabbitmq-server-windows-$env:RABBITMQ_VERSION.zip" $zip $env:RABBITMQ_SHA256
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+
+          $env:ERLANG_HOME = 'C:\Program Files\Erlang OTP'
+          if (-not (Test-Path "$env:ERLANG_HOME\bin\erl.exe")) { throw "Erlang not found at $env:ERLANG_HOME" }
+          $server = Join-Path $env:RUNNER_TEMP "rabbitmq_server-$env:RABBITMQ_VERSION\sbin\rabbitmq-server.bat"
+          Start-Process -FilePath $server -WindowStyle Hidden
+
+          $deadline = (Get-Date).AddMinutes(3)
+          while (-not (Test-NetConnection -ComputerName localhost -Port 5672 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+            if ((Get-Date) -gt $deadline) { throw 'RabbitMQ did not start listening on 5672 within 3 minutes.' }
+            Start-Sleep -Seconds 2
+          }
+          Write-Host "RabbitMQ $env:RABBITMQ_VERSION is listening on 5672."
+
+      - name: Build solution
+        run: dotnet build RabbitMQ.Refactor.sln --configuration Release
+
+      - name: Test (net472 and net8.0)
+        run: >-
+          dotnet test tests/Common.RabbitMQ.Tests/Common.RabbitMQ.Tests.csproj
+          --configuration Release --no-build
+          --logger trx --results-directory TestResults
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-windows
+          path: TestResults
