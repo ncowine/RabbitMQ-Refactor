@@ -50,6 +50,8 @@ What ADR 0001 got right still holds. The core and the server already identify a 
   - `fanout`: no key
   - `headers`: `x-match` all or any, plus header values
 - **One queue can bind to many exchanges.** An app still has one queue per mode, bound to every exchange it subscribes to. Queue modes are unchanged from ADR 0001: per-instance for clients, shared (quorum, retries, dead-letter queue) for servers.
+- **Subscriptions without keys or a header match** bind one key per handled message type (its wire name), as legacy applications do (A9). This is the default, so a plain `{ Exchange = "AppA" }` behaves like a legacy subscription.
+- **Pattern and header subscriptions bring in types a service doesn't handle.** On a shared queue those are acknowledged and skipped, not dead-lettered. Otherwise a wide pattern would flood the dead-letter queue. With only per-type bindings, an unknown message is still dead-lettered, because it signals a mistake.
 - **One virtual host, `/`, by default.** A queue can only bind to exchanges in its own virtual host, so apps that talk to each other must share one. It stays configurable for isolation, but nothing needs to set it.
 
 ### 3. Routing keys
@@ -76,6 +78,7 @@ What ADR 0001 got right still holds. The core and the server already identify a 
 
 - **Why a new method name.** An overload `PublishRemote(payload, string routingKey)` next to the existing `PublishRemote(payload, IRabbitMQService service = null)` would make existing calls written as `PublishRemote(x, null)` ambiguous, which is a compile break. `PublishRemoteTo(routingKey, payload)` avoids that.
 - **`event-type` is mandatory on every message** the core sends. Receivers identify messages by the header, so any routing key is safe for every receiver build. The routing-key fallback stays only for senders outside our code.
+- **Custom keys don't reach legacy subscribers.** Legacy subscribers bind one key per event full name (assumption A9), so a message published with a custom key reaches only subscribers that bind that key. Use custom keys for new subscribers, and keep the default key for anything legacy applications receive. Pinned by `CoreTopologyTests.CustomRoutingKey_ReachesSubscribersThatBindIt_NotLegacyPerEventSubscribers`.
 - **A routing-key convention is a contract with subscribers.** Receivers can't break on a key change, but they stop *getting* messages whose key no longer matches their binding. Changing a convention needs the same coordination as changing a public API.
 
 ### 4. Discovering events in the legacy adapter

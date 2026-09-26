@@ -6,12 +6,13 @@ namespace Messaging
     /// <summary>A message on its way out, as <see cref="IMessagingObserver"/> sees it.</summary>
     public sealed class PublishContext
     {
-        public PublishContext(string wireName, string busName, string messageId, Type messageType)
+        public PublishContext(string wireName, string busName, string messageId, Type messageType, string routingKey)
         {
             WireName = wireName;
             BusName = busName;
             MessageId = messageId;
             MessageType = messageType;
+            RoutingKey = routingKey;
         }
 
         public string WireName { get; }
@@ -23,6 +24,9 @@ namespace Messaging
 
         /// <summary>The message's runtime type, or null for a null message.</summary>
         public Type MessageType { get; }
+
+        /// <summary>Where the message is routed: the wire name unless the publisher chose another key.</summary>
+        public string RoutingKey { get; }
 
         /// <summary>
         /// Extra headers to send, added in <see cref="IMessagingObserver.OnPublishing"/>. Additive only: receivers of

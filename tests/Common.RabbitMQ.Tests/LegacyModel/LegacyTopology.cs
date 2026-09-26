@@ -5,6 +5,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using Common.RabbitMQ.Tests.Broker;
+using Messaging;
+using Messaging.RabbitMQ;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Exceptions;
 
@@ -17,6 +19,8 @@ namespace Common.RabbitMQ.Tests.LegacyModel
     public sealed class LegacyTopology : IAsyncDisposable
     {
         private readonly List<LegacyApp> apps = new List<LegacyApp>();
+        private readonly List<CoreApp> coreApps = new List<CoreApp>();
+        private readonly List<string> durableQueues = new List<string>();
         private readonly HashSet<string> exchanges = new HashSet<string>(StringComparer.Ordinal);
         private readonly string suffix = Guid.NewGuid().ToString("N").Substring(0, 12);
         private readonly IConnection connection;
@@ -56,14 +60,48 @@ namespace Common.RabbitMQ.Tests.LegacyModel
             return instance;
         }
 
-        public async Task WaitUntilConnected(params LegacyApp[] which)
+        /// <summary>
+        /// Creates an application on the core with its own exchange named after <paramref name="app"/>. Register its message
+        /// types with <see cref="CoreApp.Listen{T}"/>, then call <see cref="CoreApp.Start"/>.
+        /// </summary>
+        public CoreApp CreateCore(string app, Action<RabbitMQBusOptions> configure = null, IMessagingObserver observer = null)
+        {
+            CoreApp instance = new CoreApp(Broker, Exchange(app), app, configure, observer);
+            coreApps.Add(instance);
+            return instance;
+        }
+
+        /// <summary>Deletes durable (shared) queues when the topology is disposed.</summary>
+        public void DeleteOnDispose(params string[] queueNames)
+        {
+            durableQueues.AddRange(queueNames.Where(q => q != null && !durableQueues.Contains(q)));
+        }
+
+        public Task WaitUntilConnected(params LegacyApp[] which)
+        {
+            return WaitUntil(() => which.All(a => a.IsConnected));
+        }
+
+        public Task WaitUntilConnected(params CoreApp[] which)
+        {
+            return WaitUntil(() => which.All(a => a.IsConnected));
+        }
+
+        /// <summary>Takes one message off <paramref name="queueName"/>, or null when it is empty.</summary>
+        public async Task<CapturedMessage> Get(string queueName)
+        {
+            BasicGetResult result = await channel.BasicGetAsync(queueName, autoAck: true).ConfigureAwait(false);
+            return result == null ? null : WireCapture.Copy(result.Exchange, result.RoutingKey, result.BasicProperties, result.Body);
+        }
+
+        private static async Task WaitUntil(Func<bool> connected)
         {
             Stopwatch stopwatch = Stopwatch.StartNew();
-            while (!which.All(a => a.IsConnected))
+            while (!connected())
             {
                 if (stopwatch.Elapsed > TestBus.Timeout)
                 {
-                    throw new TimeoutException($"Legacy apps did not connect within {TestBus.Timeout.TotalSeconds}s.");
+                    throw new TimeoutException($"Apps did not connect within {TestBus.Timeout.TotalSeconds}s.");
                 }
 
                 await Task.Delay(50).ConfigureAwait(false);
@@ -130,8 +168,18 @@ namespace Common.RabbitMQ.Tests.LegacyModel
                 app.Dispose();
             }
 
+            foreach (CoreApp app in coreApps)
+            {
+                app.Dispose();
+            }
+
             try
             {
+                foreach (string queueName in durableQueues)
+                {
+                    await channel.QueueDeleteAsync(queueName).ConfigureAwait(false);
+                }
+
                 foreach (string exchange in exchanges)
                 {
                     await channel.ExchangeDeleteAsync(exchange).ConfigureAwait(false);
