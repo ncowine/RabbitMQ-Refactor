@@ -50,9 +50,9 @@ namespace Common.RabbitMQ.Tests.Broker
             Record(nameof(OnHandled), context.WireName, context.MessageId, context.CorrelationId, null, null);
         }
 
-        public void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception)
+        public void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception, FailedMessageAction action)
         {
-            Record(nameof(OnHandlingFailed), context.WireName, context.MessageId, context.CorrelationId, exception, null);
+            Record(nameof(OnHandlingFailed), context.WireName, context.MessageId, context.CorrelationId, exception, null, action);
         }
 
         public void OnConnectionChanged(ConnectionStateChange change)
@@ -81,7 +81,7 @@ namespace Common.RabbitMQ.Tests.Broker
             return events.Count(e => e.Callback == callback);
         }
 
-        private void Record(string callback, string wireName, string messageId, string correlationId, Exception exception, ConnectionStateChange connection)
+        private void Record(string callback, string wireName, string messageId, string correlationId, Exception exception, ConnectionStateChange connection, FailedMessageAction? action = null)
         {
             events.Enqueue(new ObservedEvent
             {
@@ -91,6 +91,7 @@ namespace Common.RabbitMQ.Tests.Broker
                 CorrelationId = correlationId,
                 Exception = exception,
                 Connection = connection,
+                Action = action,
                 ThreadId = Thread.CurrentThread.ManagedThreadId,
             });
 

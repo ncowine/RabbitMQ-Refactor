@@ -122,8 +122,15 @@ The legacy projects keep their paths. Legacy apps reference them by relative `Pr
 
 - The current legacy topology is valid on 4.x: exclusive queues are exempt from the deprecation of transient non-exclusive queues, and global QoS isn't used.
 - Server-side shared queues (competing consumers) are **quorum queues**, since classic mirroring was removed in 4.0.
-- Quorum queues have a **default delivery limit of 20** in 4.x. The server always declares a **dead-letter exchange and queue**, so poison messages aren't silently dropped.
-- Handler timeouts stay well under the broker's `consumer_timeout` (30 minutes by default).
+- Quorum queues have a **default delivery limit of 20** in 4.x. The server always declares a **dead-letter queue**, so poison messages aren't silently dropped.
+- **Measured on 4.3.6:** the delivery limit counts deliveries lost with a connection (a crashed consumer), **not** `basic.nack` with requeue. A handler that fails and requeues loops forever (6,000+ redeliveries in 3 seconds). So:
+  - **Retries run in the process.** The handlers run up to `MaxAttempts` times, with `RetryDelay` between attempts, and the delivery is then rejected without requeue, which dead-letters it. The retry count doesn't depend on broker counting rules.
+  - **The delivery limit is the crash guard.** `DeliveryLimit` (default 5) dead-letters a message that takes the process down every time it is handled, with reason `delivery_limit`.
+  - **Poison and unknown messages** (a body that won't deserialize, or a message type the bus doesn't handle) are dead-lettered at once, without retries.
+- The shared queue is `clientname.busname`, with `clientname.busname.dead-letter` beside it. Both are quorum queues. Dead-lettering goes through the default exchange, at least once (`x-dead-letter-strategy: at-least-once`, which requires `x-overflow: reject-publish`).
+- **No echo drop on shared queues.** Which instance picks up a message is arbitrary, so dropping "own" messages would be nondeterministic. A service that subscribes to what it publishes handles it, which also lets modules of one process talk over the bus. Per-instance queues keep the legacy echo drop.
+- **Shared queues give each message to one instance.** State kept in process memory (such as the API's employee cache) then diverges once there is more than one instance. Before scaling a service out, move that state out of process, or subscribe the handler per instance (a per-handler queue mode; not built).
+- Retries hold the delivery, so `MaxAttempts × RetryDelay` plus handler time must stay well under the broker's `consumer_timeout` (30 minutes by default).
 
 ### 7. Dependency hygiene
 

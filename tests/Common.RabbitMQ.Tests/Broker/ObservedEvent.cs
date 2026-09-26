@@ -18,6 +18,9 @@ namespace Common.RabbitMQ.Tests.Broker
 
         public ConnectionStateChange Connection { get; set; }
 
+        /// <summary>Set for OnHandlingFailed.</summary>
+        public FailedMessageAction? Action { get; set; }
+
         public int ThreadId { get; set; }
     }
 }

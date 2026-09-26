@@ -36,5 +36,23 @@ namespace Messaging.RabbitMQ
         public ushort PrefetchCount { get; set; } = 50;
 
         public TimeSpan Heartbeat { get; set; } = TimeSpan.FromSeconds(30);
+
+        /// <summary>Per-instance queues (the default, and the legacy topology) or one shared quorum queue.</summary>
+        public QueueMode QueueMode { get; set; } = QueueMode.PerInstance;
+
+        /// <summary>Shared queues only: the queue name. Defaults to <c>clientname.busname</c>, lower case.</summary>
+        public string SharedQueueName { get; set; }
+
+        /// <summary>Shared queues only: how many times the handlers run for one delivery before it is dead-lettered.</summary>
+        public int MaxAttempts { get; set; } = 3;
+
+        /// <summary>Shared queues only: the wait between attempts.</summary>
+        public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        /// Shared queues only: the quorum queue's x-delivery-limit. Guards against a message that crashes the process
+        /// every time: the broker counts deliveries lost with a connection, not requeues (RabbitMQ 4.x).
+        /// </summary>
+        public int DeliveryLimit { get; set; } = 5;
     }
 }

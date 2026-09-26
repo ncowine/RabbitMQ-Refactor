@@ -35,6 +35,7 @@ namespace Messaging.RabbitMQ
         private readonly IInboundDispatcher dispatcher;
         private readonly IMessagingObserver observer;
         private readonly string instanceId;
+        private readonly string queueName;
         private readonly ConcurrentQueue<PendingMessage> outstandingMessages = new ConcurrentQueue<PendingMessage>();
         private readonly ConcurrentDictionary<string, MessageRegistration> subscriptions =
             new ConcurrentDictionary<string, MessageRegistration>(StringComparer.Ordinal);
@@ -67,6 +68,15 @@ namespace Messaging.RabbitMQ
             this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
             this.observer = observer ?? NullMessagingObserver.Instance;
             instanceId = string.IsNullOrWhiteSpace(options.InstanceId) ? Guid.NewGuid().ToString("N") : options.InstanceId;
+
+            if (options.QueueMode == QueueMode.Shared && (options.MaxAttempts < 1 || options.DeliveryLimit < 1))
+            {
+                throw new ArgumentException("MaxAttempts and DeliveryLimit must be at least 1.", nameof(options));
+            }
+
+            queueName = options.QueueMode == QueueMode.Shared
+                ? (string.IsNullOrWhiteSpace(options.SharedQueueName) ? $"{options.ClientName}.{options.BusName}".ToLowerInvariant() : options.SharedQueueName)
+                : $"{options.ClientName}.{options.BusName}.{instanceId}".ToLowerInvariant();
         }
 
         /// <summary>Connection and error messages. The sender is this bus.</summary>
@@ -81,6 +91,12 @@ namespace Messaging.RabbitMQ
         public bool IsPublisherConnected => IsOpen(publisherConnection, publisherChannel);
 
         public int OutstandingCount => outstandingMessages.Count;
+
+        /// <summary>The queue this bus consumes from: its own per-instance queue, or the service's shared queue.</summary>
+        public string QueueName => queueName;
+
+        /// <summary>Shared queues only: where failed messages go. Null for per-instance queues.</summary>
+        public string DeadLetterQueueName => options.QueueMode == QueueMode.Shared ? queueName + ".dead-letter" : null;
 
         /// <summary>Subscribes to <paramref name="registrations"/> and starts connecting in the background.</summary>
         public void Start(IEnumerable<MessageRegistration> registrations)
@@ -249,13 +265,9 @@ namespace Messaging.RabbitMQ
                 await DeclareExchange(channel, token).ConfigureAwait(false);
                 await channel.BasicQosAsync(0, options.PrefetchCount, false, token).ConfigureAwait(false);
 
-                // One queue per running instance: every instance gets every message, and the queue goes away with it.
-                QueueDeclareOk queue = await channel.QueueDeclareAsync(
-                    queue: $"{options.ClientName}.{options.BusName}.{instanceId}".ToLowerInvariant(),
-                    durable: false,
-                    exclusive: true,
-                    autoDelete: true,
-                    cancellationToken: token).ConfigureAwait(false);
+                QueueDeclareOk queue = options.QueueMode == QueueMode.Shared
+                    ? await DeclareSharedQueue(channel, token).ConfigureAwait(false)
+                    : await DeclareInstanceQueue(channel, token).ConfigureAwait(false);
 
                 foreach (MessageRegistration registration in subscriptions.Values)
                 {
@@ -287,6 +299,50 @@ namespace Messaging.RabbitMQ
             {
                 consumerLock.Release();
             }
+        }
+
+        /// <summary>One queue per running instance: every instance gets every message, and the queue goes away with it.</summary>
+        private Task<QueueDeclareOk> DeclareInstanceQueue(IChannel channel, CancellationToken token)
+        {
+            return channel.QueueDeclareAsync(
+                queue: queueName,
+                durable: false,
+                exclusive: true,
+                autoDelete: true,
+                cancellationToken: token);
+        }
+
+        /// <summary>
+        /// One durable quorum queue for every instance of the service, with its dead-letter queue (ADR 0001, section 6).
+        /// Dead-lettering goes through the default exchange straight to the dead-letter queue, at least once.
+        /// </summary>
+        private async Task<QueueDeclareOk> DeclareSharedQueue(IChannel channel, CancellationToken token)
+        {
+            await channel.QueueDeclareAsync(
+                queue: DeadLetterQueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: new Dictionary<string, object> { ["x-queue-type"] = "quorum" },
+                cancellationToken: token).ConfigureAwait(false);
+
+            return await channel.QueueDeclareAsync(
+                queue: queueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: new Dictionary<string, object>
+                {
+                    ["x-queue-type"] = "quorum",
+                    ["x-delivery-limit"] = options.DeliveryLimit,
+                    ["x-dead-letter-exchange"] = "",
+                    ["x-dead-letter-routing-key"] = DeadLetterQueueName,
+
+                    // At-least-once dead-lettering requires reject-publish overflow.
+                    ["x-dead-letter-strategy"] = "at-least-once",
+                    ["x-overflow"] = "reject-publish",
+                },
+                cancellationToken: token).ConfigureAwait(false);
         }
 
         private async Task CloseConsumer()
@@ -343,18 +399,27 @@ namespace Messaging.RabbitMQ
             }
         }
 
+        /// <summary>
+        /// Per-instance queues (legacy behaviour): drops the bus's own messages, runs the dispatcher once and always
+        /// acknowledges. Shared queues: no echo drop (another instance's message is indistinguishable from ours), up to
+        /// <see cref="RabbitMQBusOptions.MaxAttempts"/> attempts, then the dead-letter queue. Unknown and undeserializable
+        /// messages go straight to the dead-letter queue.
+        /// </summary>
         private async Task OnMessageReceived(object sender, BasicDeliverEventArgs args)
         {
             IChannel channel = ((AsyncEventingBasicConsumer)sender).Channel;
+            bool shared = options.QueueMode == QueueMode.Shared;
+            MessageSettlement settlement = MessageSettlement.Ack;
             MessageContext context = null;
             Stopwatch stopwatch = null;
 
             try
             {
+                CancellationToken token = cancellation.Token;
                 Dictionary<string, string> headers = ReadHeaders(args.BasicProperties?.Headers);
 
                 // Our own message coming back - the sender's local side has already seen it.
-                if (headers.TryGetValue(WireHeaders.SourceId, out string sourceId) && sourceId == instanceId)
+                if (!shared && headers.TryGetValue(WireHeaders.SourceId, out string sourceId) && sourceId == instanceId)
                 {
                     return;
                 }
@@ -365,6 +430,7 @@ namespace Messaging.RabbitMQ
                 if (!subscriptions.TryGetValue(wireName, out MessageRegistration registration))
                 {
                     WriteLog($"Ignored unknown event '{wireName}'.");
+                    settlement = shared ? MessageSettlement.DeadLetter : MessageSettlement.Ack;
                     return;
                 }
 
@@ -373,35 +439,79 @@ namespace Messaging.RabbitMQ
                 Observe(o => o.OnReceived(context), nameof(IMessagingObserver.OnReceived));
                 stopwatch = Stopwatch.StartNew();
 
-                object message = serializer.Deserialize(args.Body.ToArray(), registration.MessageType);
-                await dispatcher.Dispatch(registration, message, context, args.CancellationToken).ConfigureAwait(false);
+                int attempts = shared ? options.MaxAttempts : 1;
+                for (int attempt = 1; ; attempt++)
+                {
+                    // A fresh copy per attempt, so a handler that changed the message doesn't affect the retry.
+                    // A body that can't be deserialized is never retried: it fails the message straight away.
+                    object message = serializer.Deserialize(args.Body.ToArray(), registration.MessageType);
 
-                Observe(o => o.OnHandled(context, stopwatch.Elapsed), nameof(IMessagingObserver.OnHandled));
+                    try
+                    {
+                        await dispatcher.Dispatch(registration, message, context, args.CancellationToken).ConfigureAwait(false);
+
+                        Observe(o => o.OnHandled(context, stopwatch.Elapsed), nameof(IMessagingObserver.OnHandled));
+                        return;
+                    }
+                    catch (Exception ex) when (attempt < attempts && !token.IsCancellationRequested)
+                    {
+                        WriteLog($"Failed to handle message '{args.RoutingKey}' (attempt {attempt} of {attempts}), retrying: {ex.Message}");
+                        TimeSpan duration = stopwatch.Elapsed;
+                        Observe(o => o.OnHandlingFailed(context, duration, ex, FailedMessageAction.Retrying), nameof(IMessagingObserver.OnHandlingFailed));
+                    }
+
+                    if (!await Delay(options.RetryDelay, token).ConfigureAwait(false))
+                    {
+                        settlement = MessageSettlement.None;
+                        return;
+                    }
+                }
             }
             catch (Exception ex)
             {
-                // Acked anyway so a bad message can't be redelivered forever.
+                // Per-instance queues: acked anyway so a bad message can't be redelivered forever.
                 WriteLog($"Failed to handle message '{args.RoutingKey}': {ex.Message}");
+                settlement = shared ? MessageSettlement.DeadLetter : MessageSettlement.Ack;
 
                 if (context != null)
                 {
                     TimeSpan duration = stopwatch?.Elapsed ?? TimeSpan.Zero;
-                    Observe(o => o.OnHandlingFailed(context, duration, ex), nameof(IMessagingObserver.OnHandlingFailed));
+                    FailedMessageAction action = shared ? FailedMessageAction.DeadLettered : FailedMessageAction.Dropped;
+                    Observe(o => o.OnHandlingFailed(context, duration, ex, action), nameof(IMessagingObserver.OnHandlingFailed));
                 }
             }
             finally
             {
-                try
+                await Settle(channel, args.DeliveryTag, settlement).ConfigureAwait(false);
+            }
+        }
+
+        private async Task Settle(IChannel channel, ulong deliveryTag, MessageSettlement settlement)
+        {
+            if (settlement == MessageSettlement.None)
+            {
+                return;
+            }
+
+            try
+            {
+                if (!channel.IsOpen)
                 {
-                    if (channel.IsOpen)
-                    {
-                        await channel.BasicAckAsync(args.DeliveryTag, false).ConfigureAwait(false);
-                    }
+                    return;
                 }
-                catch (Exception ex)
+
+                if (settlement == MessageSettlement.DeadLetter)
                 {
-                    WriteLog($"Failed to ack message: {ex.Message}");
+                    await channel.BasicRejectAsync(deliveryTag, requeue: false).ConfigureAwait(false);
                 }
+                else
+                {
+                    await channel.BasicAckAsync(deliveryTag, false).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"Failed to ack message: {ex.Message}");
             }
         }
 

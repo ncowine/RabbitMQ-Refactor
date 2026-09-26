@@ -33,13 +33,13 @@ namespace Common.RabbitMQ.Tests.Hosting
 
         public HandledMessages Handled => provider.GetRequiredService<HandledMessages>();
 
-        public static Task<TestHost> Start(TestBus bus, string clientName, Action<MessagingBuilder> configure)
+        public static Task<TestHost> Start(TestBus bus, string clientName, Action<MessagingBuilder> configure, Action<RabbitMQBusOptions> configureBus = null)
         {
-            return Start(bus.Broker.HostName, bus.Broker.Port, bus.Broker, bus.ExchangeName, clientName, configure);
+            return Start(bus.Broker.HostName, bus.Broker.Port, bus.Broker, bus.ExchangeName, clientName, configure, configureBus);
         }
 
         /// <summary>Starts a host whose bus points at <paramref name="hostName"/>:<paramref name="port"/>.</summary>
-        public static async Task<TestHost> Start(string hostName, int port, BrokerSettings credentials, string exchangeName, string clientName, Action<MessagingBuilder> configure)
+        public static async Task<TestHost> Start(string hostName, int port, BrokerSettings credentials, string exchangeName, string clientName, Action<MessagingBuilder> configure, Action<RabbitMQBusOptions> configureBus = null)
         {
             ServiceCollection services = new ServiceCollection();
             services.AddLogging();
@@ -59,6 +59,7 @@ namespace Common.RabbitMQ.Tests.Hosting
                     options.ClientName = clientName;
                     options.ReconnectDelay = TimeSpan.FromSeconds(1);
                     options.OutstandingPollInterval = TimeSpan.FromMilliseconds(20);
+                    configureBus?.Invoke(options);
                 });
                 configure(messaging);
             });

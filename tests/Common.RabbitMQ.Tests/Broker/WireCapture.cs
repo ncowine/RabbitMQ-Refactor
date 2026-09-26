@@ -45,29 +45,33 @@ namespace Common.RabbitMQ.Tests.Broker
             return message;
         }
 
-        private Task OnReceived(object sender, BasicDeliverEventArgs args)
+        /// <summary>Copies a delivery out of the client's buffers; its body is only valid until the callback returns.</summary>
+        public static CapturedMessage Copy(string exchange, string routingKey, IReadOnlyBasicProperties properties, ReadOnlyMemory<byte> body)
         {
             Dictionary<string, string> headers = new Dictionary<string, string>(StringComparer.Ordinal);
-            if (args.BasicProperties.Headers != null)
+            if (properties.Headers != null)
             {
-                foreach (KeyValuePair<string, object> header in args.BasicProperties.Headers)
+                foreach (KeyValuePair<string, object> header in properties.Headers)
                 {
                     headers[header.Key] = header.Value is byte[] bytes ? Encoding.UTF8.GetString(bytes) : header.Value?.ToString();
                 }
             }
 
-            messages.Enqueue(new CapturedMessage
+            return new CapturedMessage
             {
-                Exchange = args.Exchange,
-                RoutingKey = args.RoutingKey,
-                ContentType = args.BasicProperties.ContentType,
-                MessageId = args.BasicProperties.MessageId,
-                AppId = args.BasicProperties.AppId,
+                Exchange = exchange,
+                RoutingKey = routingKey,
+                ContentType = properties.ContentType,
+                MessageId = properties.MessageId,
+                AppId = properties.AppId,
                 Headers = headers,
+                Body = body.ToArray(),
+            };
+        }
 
-                // The body buffer is only valid during this callback.
-                Body = args.Body.ToArray(),
-            });
+        private Task OnReceived(object sender, BasicDeliverEventArgs args)
+        {
+            messages.Enqueue(Copy(args.Exchange, args.RoutingKey, args.BasicProperties, args.Body));
             available.Release();
 
             return Task.CompletedTask;

@@ -34,6 +34,7 @@
 
   <!-- Messaging.Hosting is the server's (net8.0+); its tests don't exist in the net472 build. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="Microsoft.Extensions.Configuration" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
     <ProjectReference Include="..\..\src\Messaging\Messaging.Hosting\Messaging.Hosting.csproj" />

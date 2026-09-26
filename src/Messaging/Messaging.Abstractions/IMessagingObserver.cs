@@ -30,8 +30,11 @@ namespace Messaging
         /// <summary>The dispatcher completed. The message is acknowledged next.</summary>
         void OnHandled(MessageContext context, TimeSpan duration);
 
-        /// <summary>Deserializing or dispatching failed. The message is acknowledged anyway.</summary>
-        void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception);
+        /// <summary>
+        /// Deserializing or dispatching failed. <paramref name="action"/> says what happens next: another attempt, the
+        /// dead-letter queue, or (per-instance queues) nothing.
+        /// </summary>
+        void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception, FailedMessageAction action);
 
         void OnConnectionChanged(ConnectionStateChange change);
     }

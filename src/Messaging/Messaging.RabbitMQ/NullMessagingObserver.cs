@@ -27,7 +27,7 @@ namespace Messaging.RabbitMQ
         {
         }
 
-        public void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception)
+        public void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception, FailedMessageAction action)
         {
         }
 

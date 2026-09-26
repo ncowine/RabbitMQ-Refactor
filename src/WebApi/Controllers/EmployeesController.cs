@@ -54,7 +54,8 @@ namespace WebApi.Controllers
         {
             Stamp(id, employee);
 
-            // PublishRemote also raised the event locally, which updated the cache through the API's own subscriber.
+            // Updated here so the change is visible at once. The API also handles its own EmployeeUpdated from its shared
+            // queue (shared queues don't drop a service's own messages); that second upsert is harmless.
             employeeCache.Upsert(employee);
 
             await publisher.PublishAsync(employee.ToEmployeeUpdated(), cancellationToken);

@@ -106,15 +106,34 @@ namespace Messaging.Hosting
             }
         }
 
-        public void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception)
+        public void OnHandlingFailed(MessageContext context, TimeSpan duration, Exception exception, FailedMessageAction action)
         {
-            processDuration.Record(duration.TotalSeconds, Tags(context.BusName, context.WireName, exception.GetType().FullName));
-            logger.LogError(exception, "[{Bus}] Handling {WireName} {MessageId} failed; the message is acknowledged and dropped.", context.BusName, context.WireName, context.MessageId);
-
-            if (context.Items.TryGetValue(ActivityItem, out object item))
+            Activity activity = context.Items.TryGetValue(ActivityItem, out object item) ? (Activity)item : null;
+            if (activity != null)
             {
-                Activity activity = (Activity)item;
                 AddException(activity, exception);
+            }
+
+            // A retry is an event on the same span; the span and the duration end with the final outcome.
+            if (action == FailedMessageAction.Retrying)
+            {
+                logger.LogWarning(exception, "[{Bus}] Handling {WireName} {MessageId} failed; retrying.", context.BusName, context.WireName, context.MessageId);
+                return;
+            }
+
+            processDuration.Record(duration.TotalSeconds, Tags(context.BusName, context.WireName, exception.GetType().FullName));
+            if (action == FailedMessageAction.DeadLettered)
+            {
+                logger.LogError(exception, "[{Bus}] Handling {WireName} {MessageId} failed; the message was moved to the dead-letter queue.", context.BusName, context.WireName, context.MessageId);
+            }
+            else
+            {
+                logger.LogError(exception, "[{Bus}] Handling {WireName} {MessageId} failed; the message is acknowledged and dropped.", context.BusName, context.WireName, context.MessageId);
+            }
+
+            if (activity != null)
+            {
+                activity.SetTag("messaging.failure.action", action.ToString());
                 activity.SetStatus(ActivityStatusCode.Error, exception.Message);
                 activity.Stop();
             }
