@@ -1,6 +1,6 @@
 # ADR 0002: Exchange per owner, configurable routing, and discovering events by assembly
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Amends:** [ADR 0001](0001-decouple-messaging-from-prism.md), sections 1–3, and the test baseline from delivery step 0. Everything else in ADR 0001 stands: the layers, the core and hosting split, serialization, observability, shared queues and dependency hygiene.
 

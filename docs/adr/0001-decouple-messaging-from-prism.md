@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-09-26
 - **Amended:** 2026-09-26. Legacy projects stay at their current paths, and every library that legacy apps load targets net472 explicitly (sections 1 and 7).
+- **Amended by:** [ADR 0002](0002-exchange-per-owner-and-configurable-routing.md) (2026-09-26), for sections 1–3 and the step-0 test baseline: one exchange per application, configurable exchange types and routing keys, and events found by assembly. Where the two conflict, ADR 0002 wins.
 
 ## Context
 
