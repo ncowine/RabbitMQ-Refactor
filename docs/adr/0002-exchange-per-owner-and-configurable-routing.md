@@ -111,6 +111,7 @@ What ADR 0001 got right still holds. The core and the server already identify a 
   Handlers say *which message types* they handle. Subscriptions say *which exchanges and keys* feed the queue.
 - **Common netstandard2.0 events.** Legacy apps keep the Prism version. Modern apps get a plain-class twin with the **same wire name** and stop referencing the Prism project. The Prism version is deleted when legacy is retired. This is the pattern ADR 0001 already uses for the server (`Common.Events.EmployeeUpdated` next to `Employees.Contracts.EmployeeUpdated`).
 - **Telemetry becomes opt-in** (`.AddTelemetry()`) so modern clients don't get server observability imposed on them, as ADR 0001 section 5 intended.
+- **Desktop apps don't need Prism either.** A view model can't be a scoped handler class, so `Messaging.Hosting` also offers `IMessageSubscriber`: `Subscribe<T>(action, synchronizationContext)` returns an `IDisposable`. It is an `IMessageSink`, so it runs after the handlers, for the exact message type, in subscription order. Passing the UI thread's context posts the call there, like Prism's `ThreadOption.UIThread`. A posted call can't fail the message, because it runs later: its exceptions go to the dispatcher. Without a context, or with the async overload, an exception fails the message like a handler's. Subscriptions are strong references, not Prism's weak ones, so a short-lived subscriber must dispose them.
 
 ### 6. The server as publisher (long term)
 
@@ -171,6 +172,12 @@ These follow ADR 0001's steps 0–3b, which are done. Each can be released on it
    - **`Messaging.Prism`:** `UseEventAggregator(aggregator)` raises each message as `MessageEvent<T>`, with `PublishRemote` and `PublishRemoteTo` on it. This keeps the `IEventAggregator` style for plain classes.
    - **The net8 WPF app is the reference:** its Legacy bus stays on Prism events through the adapter, and its Modern bus uses plain `Employees.Contracts` classes through the bridge, both on one aggregator.
    - **Common-event twins:** the plain-class twins for the common events already exist in `Employees.Contracts` (`EmployeeSaved`, `EmployeeCacheRefreshed`, `EmployeeUpdated`).
+9. **Desktop apps without Prism.** `IMessageSubscriber` in `Messaging.Hosting` (section 5), and a demo app that uses no Prism at all.
+
+   *As built (2026-09-26):*
+   - **`IMessageSubscriber`** is registered by `AddMessaging`, as a singleton that is also an `IMessageSink`. Its subscription list is copy-on-write, so delivering a message never takes a lock.
+   - **`WpfApp.Modern`** (net8.0-windows) uses the .NET Generic Host for DI, `appsettings.json` and logging, CommunityToolkit.Mvvm for its view model, and plain `Employees.Contracts` classes on both its Legacy and its Modern bus. It builds its window, and so its subscriptions, before starting the host, so no early message is missed. The other apps can't tell it apart from the Prism apps, because the wire names are the same.
+   - `WpfApp.Net8` stays as the reference for apps that keep Prism.
 
 ADR 0001's optional step 4 (`SubscribeOnly`, `[Obsolete]` on `PublishRemote`, outbox) stays optional and comes after these.
 
